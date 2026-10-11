@@ -4,17 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目结构
 
-仓库由三个相对独立的部分组成：
+仓库由两个相对独立的部分组成：
 
-| 目录 | 类型 | 作用 | 依赖 |
+| 目录/文件 | 类型 | 作用 | 依赖 |
 |------|------|------|------|
-| `collector/` | 本仓库 | Linux 主机 + GPU 指标采集，HTTP 暴露为 Prometheus 指标 | 纯标准库 + `pynvml`（无第三方依赖） |
+| `collector/` | 本仓库 | Linux 主机 + GPU 指标采集，HTTP 暴露为 Prometheus 指标 | `pynvml`（硬依赖）+ 标准库 |
 | `backen/` | 本仓库 | FastAPI Dashboard，从 Prometheus 拉取指标并渲染 | FastAPI / uvicorn / httpx / jinja2 / pyyaml |
-| `QoSController/` | git 子模块 | RYU SDN 控制器 + Mininet 仿真，QoS 路由策略 | RYU / Mininet / gRPC / OpenFlow 1.3 |
+| `netSim_cmnet.py` | 本仓库 | Mininet 中国移动 CMNET 骨干网拓扑生成器（仿真脚本，非模块） | Mininet / Open vSwitch |
 
-子模块指向 `https://github.com/zinb97/QoSController.git`，首次克隆后需 `git submodule update --init`。`QoSController/CLAUDE.md` 自带完整架构、命令、指标列表与 DSCP 路由策略——**修改子模块前先读它**。
+注：`QoSController/`（RYU SDN 控制器 + QoS 路由策略）历史上作为 git 子模块引入，**目前仓库内不存在**（既无 `QoSController/` 目录，也无 `.gitmodules`）。`controller/` 目录是空的占位符；勿在此处添加文件以免与未来重新引入的子模块冲突。
 
-`backen/README.md` 含 `backen/` 完整架构、API、环境变量与运行方式——**修改 `backen/` 前先读它**。本文件其余部分主要描述 `collector/`。
+`backen/README.md` 含 `backen/` 完整架构、API、环境变量与运行方式——**修改 `backen/` 前先读它**。本文件其余部分主要描述 `collector/` 与顶层脚本。
 
 ## 端到端数据流
 
@@ -32,7 +32,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 仓库根目录有与项目无关的旧文件，**不要修改或引用**：
 - `main.py` — PyCharm 自动生成的样板（`print_hi`），非任何入口
-- `index.html` — 旧版独立 Dashboard（1154 行），无后端连接，已被 `backen/` 取代
+- `index.html` — 旧版独立 Dashboard（57 KB），无后端连接，已被 `backen/` 取代
+- `controller/` — 空目录，是已被移除的 QoSController 子模块的占位符
+- `.idea/` — PyCharm 项目配置，已被 `.gitignore` 忽略
+
+`netSim_cmnet.py` 是真实的 Mininet 仿真脚本（CMNET 骨干网拓扑生成），它**不是**入口脚本——直接 `python netSim_cmnet.py [--scale small|medium|large|full]` 启动仿真，需配合外部 RYU 控制器使用。
 
 ---
 
@@ -54,7 +58,7 @@ HTTP 端点：
 ## collector/ 代码结构
 
 - `collector/host_collector.py` — `HostCollector` 类。所有的 `_read_*` 方法各自读取一个 procfs/sysfs 数据源；`_collect_all()` 一次性调用它们并将结果存入 `self._data`。提供两种输出方法：`to_json()` 与 `to_prometheus(per_cpu=True)`。
-- `collector/gpu_collector.py` — `GpuCollector` 类，通过 `pynvml` 调用 NVML。采集 `references/metrics_extracted.csv` 中全部 18 个 `DCGM_FI_DEV_*` 指标（命名约定参考）。提供 `to_json()` 与 `to_prometheus(**_kwargs)`（忽略多余 kwargs，便于统一调用）。依赖 `pynvml`（硬依赖，无降级）。
+- `collector/gpu_collector.py` — `GpuCollector` 类，通过 `pynvml` 调用 NVML。采集文件中标注的 18 个 `DCGM_FI_DEV_*` 指标（命名约定参考 `1.txt` 中的列顺序）。提供 `to_json()` 与 `to_prometheus(**_kwargs)`（忽略多余 kwargs，便于统一调用）。依赖 `pynvml`（硬依赖，无降级）。
 - `collector/metrics_exporter.py` — `MetricsHandler`（`http.server.BaseHTTPRequestHandler` 的子类）与 `MetricsExporter`（封装 `socketserver.TCPServer`）。处理器持有 `collectors` 列表，每次抓取时对每个采集器调用 `to_prometheus(per_cpu=...)` 并拼接输出；`MetricsExporter` 默认同时挂载 `HostCollector` 与 `GpuCollector`。
 
 ## 采集的数据源
@@ -87,11 +91,13 @@ HTTP 端点：
 
 仓库中**无测试、无 linter 配置**。
 
-- `collector/`：
+- `collector/`（语法检查，必须在 `collector/` 目录下执行）：
   ```bash
-  python -m py_compile collector/host_collector.py
-  python -m py_compile collector/metrics_exporter.py
-  python -m py_compile collector/gpu_collector.py
+  cd collector
+  python -m py_compile host_collector.py
+  python -m py_compile metrics_exporter.py
+  python -m py_compile gpu_collector.py
   ```
+  `metrics_exporter.py` 使用裸导入，因此 `py_compile` 之外**不能** `python -m collector.metrics_exporter` 形式启动；启动方式见上文「collector/ 运行方式」。
 - `backen/`：见 `backen/README.md` 的「验证」段落。
-- `QoSController/`：见 `QoSController/CLAUDE.md` 的「常用命令」段落。
+- `netSim_cmnet.py`：Mininet 需在 Linux 运行；Windows 上无法直接启动仿真。

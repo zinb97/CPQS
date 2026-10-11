@@ -4,6 +4,26 @@ Mininet Topology Generator - 中国移动 CMNET 骨干网拓扑
 - 层级：超级核心 → 大区中心 → 省网核心 → 城域接入
 - 规模可选：small/medium/large/full 四档（控制省数）
 - DPID 规则与项目 ChinaNet 一致：00000000{L:02x}{idx:02x}0001
+- 兼容新版 Mininet（`addSwitch`/`addHost` 仅返回名字字符串）
+
+修复记录（与 `netSim_cmnet.py` 同源，作为净版）：
+    1. `_build_region` 原 `pairs` 误把 super_core code ('gz','sh') 当 region，
+       导致 KeyError。改为以 5 个 region code 构成的 pentagon 环。
+    2. 节点容器不再存 Node 对象，改存 name 字符串（原 Mininet 老 API 中
+       `addSwitch` 返回 Node；但当前 Mininet 仅返回 name，
+       原代码 `s.name` 在新 API 全部炸 `AttributeError`）。
+    3. 省 → 父节点反查改为直接构造名字 `S{p_idx}`/`R{p_idx}`，去掉
+       `name_to_switch` 字典。
+    4. metro 层 DPID 由 14 hex 修正为 16 hex（与上层一致）。
+    5. `province_to_parent` 显式补 'bj'→S1、'sh'→S2（原代码靠
+       `dict.get(...,default)` 兜底，'sh' 被错误回退到 S1 北京）。
+
+用法：
+    sudo python3 netSim_cmnet.py --scale small
+    sudo python3 netSim_cmnet.py --scale medium --prov-depth 2 --prov-width 2
+
+注意：实际 `Mininet.start()` 需 sudo（创建 netns、调用 ovs-vsctl）；
+    pure-python 阶段（仅构造 Topo）不需要。
 """
 import argparse
 from enum import Enum
@@ -32,7 +52,6 @@ class CMNetLevel(Enum):
 
 # 3 超级核心（CMNET 全国三大国际出口/超级核心）
 SUPER_CORE_CITIES = [
-    # (code, idx, 中文名)
     ('bj', 1, '北京'),
     ('sh', 2, '上海'),
     ('gz', 3, '广州'),
@@ -72,6 +91,25 @@ SCALE_PROVINCES = {
 
 
 # ==============================================================================
+# DPID 工具
+# ==============================================================================
+def _dpid(level, idx):
+    """生成 16 hex 字符的 DPID，规则：`00000000{L:02x}{idx:06x}`。
+
+    dp 前 8 个 0 是 32 位“零厂商”前缀；后 8 hex = level (1B) + idx (3B)。
+    idx 编码语义：
+        L1 超级核心 idx = (super_idx << 16) | 1
+        L2 大区     idx = (region_idx << 16) | 1
+        L3 省网     idx = (prov_idx  << 16) | 1
+        L4 城域     idx = (prov_idx  << 16) | (depth << 8) | pos
+            （depth=1 表示第一层城域, pos 为该层内的位号 1..N）
+
+    最大 idx ≈ 31<<16 + 4<<8 + 6 = 0x1F0106 ≪ 0xFFFFFF，6 hex 字符够用。
+    """
+    return f'00000000{level:02x}{int(idx):06x}'
+
+
+# ==============================================================================
 # CMNET 拓扑类
 # ==============================================================================
 class CMNetTopo(Topo):
@@ -80,19 +118,19 @@ class CMNetTopo(Topo):
 
     层级：
       L1 超级核心 (3 节点：北京/上海/广州，全互联)
-      L2 大区中心 (5 节点：武汉/成都/西安/南京/沈阳，环形双平面)
+      L2 大区中心 (5 节点：武汉/成都/西安/南京/沈阳，pentagon 环 + 上联超级核心)
       L3 省网核心 (5/10/23/31 节点，根据 scale)
       L4 城域接入 (每省 prov_width×prov_depth 树形)
 
-    DPID 规则（与 ChinaNet 一致）：
-      00000000{L:02x}{idx:02x}0001
+    DPID 规则（与 ChinaNet 一致，十六进制 8 字节）：
+      00000000{L:02x}{idx:06x}
       L1=超级核心 L2=大区 L3=省 L4=城域
 
     命名：
       S1~S3   超级核心
       R4~R8   大区
       P1~P31  省网
-      M{a}{b} 城域（a=省号, b=层内编号）
+      M{a}{b}{c?}{d?}  城域（a=省号, b=第1层位号; c=层深, d=层内位号，可省略）
 
     链路参数（bw Mbps / delay ms / loss %）：
       超级核心互联  400 / 18~30 / 0.1
@@ -116,11 +154,13 @@ class CMNetTopo(Topo):
         self.prov_depth = prov_depth
         self.prov_width = prov_width
 
-        # 节点容器
-        self.super_core = {}   # code -> switch
-        self.region     = {}   # code -> switch
-        self.province   = {}   # code -> switch
-        self.metro      = []   # list[(prov_idx, switch)]
+        # 节点容器：仅存 name（字符串），兼容新旧 Mininet API。
+        # （Mininet 2.x+ 的 `addSwitch` 仅返回 name 字符串；老 API 行为
+        #   已废弃，原脚本假定返回值带 `.name` 会 AttributeError。）
+        self.super_core = {}   # code -> str(Switch name)
+        self.region     = {}   # code -> str(Switch name)
+        self.province   = {}   # code -> str(Switch name)
+        self.metro      = []   # list[(prov_idx, str(Metro name))]
 
         super().__init__(**params)
         self.build_topo()
@@ -138,11 +178,12 @@ class CMNetTopo(Topo):
     # ---------- L1 超级核心 ----------
     def _build_super_core(self):
         for code, idx, name in SUPER_CORE_CITIES:
-            dpid = f'00000000{CMNetLevel.SUPER_CORE.value:02x}{idx:02x}0001'
+            sw_name = f'S{idx}'
+            dpid = _dpid(CMNetLevel.SUPER_CORE.value, idx * 0x10000 + 1)
             self.super_core[code] = self.addSwitch(
-                f'S{idx}', dpid=dpid, protocols='OpenFlow13',
+                sw_name, dpid=dpid, protocols='OpenFlow13',
             )
-            info(f'  [L1 超级核心] S{idx} {name}  dpid={dpid}\n')
+            info(f'  [L1 超级核心] {sw_name} {name}  dpid={dpid}\n')
 
         # 全互联（现实参考：北京-上海 RTT ~25ms、北京-广州 ~30ms、上海-广州 ~18ms）
         self._add(self.super_core['bj'], self.super_core['sh'], 400, '25ms', 0.1)
@@ -151,20 +192,20 @@ class CMNetTopo(Topo):
 
         # 每个超级核心挂 1 个测试主机
         for i, code in enumerate(['bj', 'sh', 'gz']):
-            host = self.addHost(f'ts{i+1}', ip=f'10.0.1.10{i+1}/24')
-            self.addLink(self.super_core[code], host)
+            host_name = self.addHost(f'ts{i+1}', ip=f'10.0.1.10{i+1}/24')
+            self.addLink(self.super_core[code], host_name)
 
     # ---------- L2 大区中心 ----------
     def _build_region(self):
         for code, idx, name in REGION_CITIES:
-            dpid = f'00000000{CMNetLevel.REGION.value:02x}{idx:02x}0001'
+            sw_name = f'R{idx}'
+            dpid = _dpid(CMNetLevel.REGION.value, idx * 0x10000 + 1)
             self.region[code] = self.addSwitch(
-                f'R{idx}', dpid=dpid, protocols='OpenFlow13',
+                sw_name, dpid=dpid, protocols='OpenFlow13',
             )
-            info(f'  [L2 大区]     R{idx} {name}  dpid={dpid}\n')
+            info(f'  [L2 大区]     {sw_name} {name}  dpid={dpid}\n')
 
         # 大区上联最近的超级核心（按地理就近）
-        # 格式：(大区 code, 核心 code, 延迟)
         uplink = [
             ('wh', 'bj', '15ms'),  # 武汉  -> 北京
             ('cd', 'gz', '20ms'),  # 成都  -> 广州
@@ -175,11 +216,12 @@ class CMNetTopo(Topo):
         for code, core_code, delay in uplink:
             self._add(self.region[code], self.super_core[core_code], 400, delay, 0.1)
 
-        # 大区之间环形（双平面保护）
+        # 大区之间 pentagon 环（双平面保护）。
+        # 原脚本此处把 super_core code ('gz','sh') 当成 region code 用，导致
+        # `self.region['gz']` KeyError。改用全 5 个 region code，绕一圈闭合。
         pairs = [
-            ('wh', 'xa'), ('xa', 'cd'), ('cd', 'gz'),
-            ('gz', 'sh'), ('sh', 'nj'), ('nj', 'wh'),
-            ('sy', 'wh'),  # 沈阳额外回环到武汉，避免单边
+            ('wh', 'xa'), ('xa', 'cd'), ('cd', 'sy'),
+            ('sy', 'nj'), ('nj', 'wh'),
         ]
         for a, b in pairs:
             self._add(self.region[a], self.region[b], 200, '10ms', 0.1)
@@ -187,72 +229,79 @@ class CMNetTopo(Topo):
     # ---------- L3 省网核心 ----------
     def _build_province(self):
         # 省 → 父节点 (大区或超级核心)，按现实地理就近映射
+        # 北京上海两市：所在省 SW 上联到本市 S1/S2（同地但不形成自环）
         province_to_parent = {
-            # 华北 -> 北京
-            'tj': ('S', 1), 'hb': ('S', 1), 'sx': ('S', 1), 'nm': ('S', 1),
-            'xj': ('S', 1),  # 新疆就近北京（远距离）
-            # 东北 -> 沈阳
+            # 华北 -> S1 北京
+            'bj': ('S', 1), 'tj': ('S', 1), 'hb': ('S', 1),
+            'sx': ('S', 1), 'nm': ('S', 1), 'xj': ('S', 1),
+            # 东北 -> R8 沈阳
             'ln': ('R', 8), 'jl': ('R', 8), 'hl': ('R', 8),
-            # 华东 -> 上海 / 南京
-            'js': ('R', 7), 'zj': ('S', 2), 'ah': ('R', 7),
+            # 华东 -> S2 上海 / R7 南京
+            'sh': ('S', 2), 'js': ('R', 7), 'zj': ('S', 2), 'ah': ('R', 7),
             'fj': ('S', 2), 'jx': ('R', 7), 'sd': ('S', 1),
-            # 华中 -> 武汉
+            # 华中 -> R4 武汉
             'ha': ('R', 4), 'hb2': ('R', 4), 'hn': ('R', 4),
-            # 华南 -> 广州
+            # 华南 -> S3 广州
             'gd': ('S', 3), 'gx': ('S', 3), 'hn2': ('S', 3),
-            # 西南 -> 成都
+            # 西南 -> R5 成都
             'cq': ('R', 5), 'sc': ('R', 5), 'gz2': ('R', 5), 'yn': ('R', 5),
-            # 西北 -> 西安
+            # 西北 -> R6 西安
             'xz': ('R', 6), 'sn': ('R', 6), 'gs': ('R', 6),
             'qh': ('R', 6), 'nx': ('R', 6),
         }
-        # name -> switch 反查表（覆盖 L1+L2）
-        name_to_switch = {s.name: s for s in self.super_core.values()}
-        name_to_switch.update({s.name: s for s in self.region.values()})
 
         for code, idx, name in PROVINCES[:self.prov_cnt]:
-            dpid = f'00000000{CMNetLevel.PROVINCE.value:02x}{idx:02x}0001'
-            sw = self.addSwitch(f'P{idx}', dpid=dpid, protocols='OpenFlow13')
-            self.province[code] = sw
-            info(f'  [L3 省网]     P{idx} {name}  dpid={dpid}\n')
+            sw_name = f'P{idx}'
+            dpid = _dpid(CMNetLevel.PROVINCE.value, idx * 0x10000 + 1)
+            self.province[code] = self.addSwitch(
+                sw_name, dpid=dpid, protocols='OpenFlow13'
+            )
+            info(f'  [L3 省网]     {sw_name} {name}  dpid={dpid}\n')
 
-            # 上联父节点
+            # 上联父节点：直接用名字定位
             kind, p_idx = province_to_parent.get(code, ('S', 1))
             parent_name = f'S{p_idx}' if kind == 'S' else f'R{p_idx}'
-            parent = name_to_switch[parent_name]
-            self._add(sw, parent, 200, '5ms', 0.1)
+            self._add(self.province[code], parent_name, 200, '5ms', 0.1)
 
             # 每省 1 个主机
-            host = self.addHost(f'hp{idx}', ip=f'10.0.2.{idx}/24')
-            self.addLink(sw, host)
+            host_name = self.addHost(f'hp{idx}', ip=f'10.0.2.{idx}/24')
+            self.addLink(self.province[code], host_name)
 
     # ---------- L4 城域接入 ----------
     def _build_metro(self):
         # 每省下挂 prov_width × prov_depth 树
-        for code, prov_sw in self.province.items():
+        for code, prov_sw_name in self.province.items():
             prov_idx = next(i for c, i, _ in PROVINCES if c == code)
             # 第 1 层城域直接连省核心
             layer1 = []
             for w in range(1, self.prov_width + 1):
-                dpid = f'00000000{CMNetLevel.METRO.value:02x}{prov_idx:02x}{w:02x}'
-                sw = self.addSwitch(f'M{prov_idx}{w}', dpid=dpid, protocols='OpenFlow13')
-                self._add(prov_sw, sw, 100, '1ms', 0)
-                layer1.append(sw)
+                sw_name = f'M{prov_idx}1{w}'
+                dpid = _dpid(CMNetLevel.METRO.value,
+                             (prov_idx << 16) | (1 << 8) | w)
+                self.addSwitch(sw_name, dpid=dpid, protocols='OpenFlow13')
+                self._add(prov_sw_name, sw_name, 100, '1ms', 0)
+                layer1.append(sw_name)
+
             # 后续层
             current = layer1
             for d in range(2, self.prov_depth + 1):
                 nxt = []
-                for i, sw in enumerate(current, start=1):
-                    dpid = f'00000000{CMNetLevel.METRO.value:02x}{prov_idx:02x}{d}{i:01x}'
-                    leaf = self.addSwitch(f'M{prov_idx}{d}{i}', dpid=dpid, protocols='OpenFlow13')
-                    self._add(sw, leaf, 40, '1ms', 0)
-                    nxt.append(leaf)
+                for i, parent_name in enumerate(current, start=1):
+                    sw_name = f'M{prov_idx}{d}{i}'
+                    dpid = _dpid(CMNetLevel.METRO.value,
+                                 (prov_idx << 16) | (d << 8) | i)
+                    self.addSwitch(sw_name, dpid=dpid, protocols='OpenFlow13')
+                    self._add(parent_name, sw_name, 40, '1ms', 0)
+                    nxt.append(sw_name)
                 current = nxt
+
             # 末层挂主机
-            for i, sw in enumerate(current, start=1):
-                host = self.addHost(f'hm{prov_idx}{i}', ip=f'10.0.3.{prov_idx}{i:02d}/24')
-                self.addLink(sw, host)
-                self.metro.append((prov_idx, sw))
+            for i, sw_name in enumerate(current, start=1):
+                host_name = self.addHost(
+                    f'hm{prov_idx}{i}', ip=f'10.0.3.{prov_idx}{i:02d}/24'
+                )
+                self.addLink(sw_name, host_name)
+                self.metro.append((prov_idx, sw_name))
 
     # ---------- 辅助 ----------
     def _add(self, a, b, bw, delay, loss):
