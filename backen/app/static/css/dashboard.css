@@ -591,21 +591,29 @@
   color: #fff !important;
 }
 
-/* ===== 全屏模式 =====
-   当 .dashboard-screen 进入浏览器全屏时，强制按视口尺寸铺满。
-   base.html 的 chrome（顶栏 / 侧边栏）会随全屏被浏览器隐藏，
-   无需额外 display:none。
+/* ===== 网页全屏（填满浏览器视口，不调用 Fullscreen API） =====
+   给 .app-layout 加 .web-fullscreen 类即可触发：
+   隐藏 base.html 的 chrome（顶栏 / 侧边栏），让大屏铺满整个浏览器窗口。
 */
-.dashboard-screen:fullscreen,
-.dashboard-screen:-webkit-full-screen,
-.dashboard-screen:-moz-full-screen {
+.app-layout.web-fullscreen .header,
+.app-layout.web-fullscreen .sidebar {
+  display: none !important;
+}
+.app-layout.web-fullscreen {
   width: 100vw;
   height: 100vh;
-  background: var(--bg-deep);
-  padding: 0;
 }
-.dashboard-screen:fullscreen .dashboard,
-.dashboard-screen:-webkit-full-screen .dashboard,
-.dashboard-screen:-moz-full-screen .dashboard {
+.app-layout.web-fullscreen .main-wrapper {
+  flex: 1 1 auto;
+  width: 100vw;
+  height: 100vh;
+}
+.app-layout.web-fullscreen .main-content {
+  width: 100vw;
+  height: 100vh;
+  padding: 0;
+  background: transparent;
+}
+.app-layout.web-fullscreen .dashboard-screen .dashboard {
   padding: 16px 24px;
 }

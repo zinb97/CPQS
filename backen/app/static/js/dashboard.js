@@ -30,7 +30,7 @@
     return 'busy';
   }
 
-  // ===== 全屏切换（跨浏览器兼容） =====
+  // ===== 网页全屏（不调用 Fullscreen API，只切换样式类让大屏填满浏览器视口） =====
   const FS_ENTER_SVG =
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
     'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
@@ -45,62 +45,42 @@
     '<path d="M9 4v4a1 1 0 0 1-1 1H4"/>' +
     '<path d="M15 4v4a1 1 0 0 0 1 1h4"/>' +
     '<path d="M9 20v-4a1 1 0 0 0-1-1H4"/>' +
-    '<path d="M15 20v-4a1 1 0 0 1 1-1h-4"/>' +
+    '<path d="M15 20v-4a1 1 0 0 1 1-1H20"/>' +
     '</svg>';
 
-  function fsElement() {
-    return document.fullscreenElement
-      || document.webkitFullscreenElement
-      || document.mozFullScreenElement
-      || document.msFullscreenElement
-      || null;
-  }
-  function fsRequest(el) {
-    const fn = el.requestFullscreen
-      || el.webkitRequestFullscreen
-      || el.mozRequestFullScreen
-      || el.msRequestFullscreen;
-    return fn ? fn.call(el) : Promise.reject(new Error('Fullscreen API not supported'));
-  }
-  function fsExit() {
-    const fn = document.exitFullscreen
-      || document.webkitExitFullscreen
-      || document.mozCancelFullScreen
-      || document.msExitFullscreen;
-    return fn ? fn.call(document) : Promise.reject(new Error('Fullscreen API not supported'));
+  function getAppLayout() {
+    return document.querySelector('.app-layout');
   }
 
-  function getDashboardScreen() {
-    return document.querySelector('.dashboard-screen');
+  function isWebFullscreen() {
+    const layout = getAppLayout();
+    return !!layout && layout.classList.contains('web-fullscreen');
   }
 
   function resizeAllCharts() {
-    // 全屏切换后容器尺寸改变；ECharts 不会自动跟随。
+    // 容器尺寸改变后，ECharts 不会自动跟随；需手动 resize。
     if (mapChart) mapChart.resize();
     if (resourceChart) resourceChart.resize();
     if (trafficChart) trafficChart.resize();
     if (qosChart) qosChart.resize();
   }
 
-  function toggleFullscreen() {
-    const el = getDashboardScreen();
-    if (!el) return;
-    if (!fsElement()) {
-      fsRequest(el).catch((e) => console.error('requestFullscreen 失败:', e));
-    } else {
-      fsExit().catch((e) => console.error('exitFullscreen 失败:', e));
-    }
+  function toggleWebFullscreen() {
+    const layout = getAppLayout();
+    if (!layout) return;
+    layout.classList.toggle('web-fullscreen');
+    updateFullscreenBtn();
   }
 
   function updateFullscreenBtn() {
     const btn = $('#dsFullscreen');
     if (!btn) return;
-    const isFs = fsElement() === getDashboardScreen();
-    btn.innerHTML = isFs ? FS_EXIT_SVG : FS_ENTER_SVG;
-    btn.title = isFs ? '退出全屏（Esc）' : '网页全屏';
-    btn.setAttribute('aria-label', btn.title);
-    // 切换后尺寸变化，重排所有图表
-    // 使用 rAF 等到 layout 完成再 resize
+    const on = isWebFullscreen();
+    btn.innerHTML = on ? FS_EXIT_SVG : FS_ENTER_SVG;
+    const tip = on ? '退出网页全屏（Esc）' : '网页全屏';
+    btn.title = tip;
+    btn.setAttribute('aria-label', tip);
+    // 等两帧再调用，确保浏览器完成 layout 重排
     requestAnimationFrame(() => requestAnimationFrame(resizeAllCharts));
   }
 
@@ -217,6 +197,35 @@
     const hubs = visible.slice(0, 3);
     const edges = visible.slice(3);
 
+    // 省视图：以集群经纬度几何中心为地图中心，跨度越大 zoom 越小，
+    // 让所有节点落在画面中央且不被裁切。
+    let geoCenter, geoZoom;
+    if (currentMap === 'china') {
+      geoCenter = undefined;       // 全国视图交给 ECharts bbox 中心
+      geoZoom = 1.15;
+    } else if (visible.length > 0) {
+      let sumLng = 0, sumLat = 0;
+      let minLng = Infinity, maxLng = -Infinity;
+      let minLat = Infinity, maxLat = -Infinity;
+      visible.forEach((c) => {
+        const [lng, lat] = c.location;
+        sumLng += lng;
+        sumLat += lat;
+        if (lng < minLng) minLng = lng;
+        if (lng > maxLng) maxLng = lng;
+        if (lat < minLat) minLat = lat;
+        if (lat > maxLat) maxLat = lat;
+      });
+      geoCenter = [sumLng / visible.length, sumLat / visible.length];
+      // 经验公式：maxSpan=1° → zoom 5；0.5° → 6；2° → 4
+      // 单点时 span 退化为 0.1° → zoom ≈ 8.32 → 截到 8
+      const maxSpan = Math.max(maxLng - minLng, maxLat - minLat, 0.1);
+      geoZoom = Math.max(3, Math.min(8, 5 + Math.log2(1 / maxSpan)));
+    } else {
+      geoCenter = undefined;
+      geoZoom = 4.5;
+    }
+
     // 简单的全连通 hub 骨干连线（飞行线效果）
     const links = [];
     for (let i = 0; i < hubs.length; i++) {
@@ -252,7 +261,8 @@
       geo: {
         map: currentMap,
         roam: false,
-        zoom: currentMap === 'china' ? 1.15 : 4.5,
+        zoom: geoZoom,
+        center: geoCenter,
         layoutCenter: ['50%', '50%'],
         layoutSize: currentMap === 'china' ? '92%' : '90%',
         label: { show: false },
@@ -709,15 +719,12 @@
     refreshAlerts();
     setInterval(refreshAlerts, CARDS_MS);
 
-    // 全屏切换：按钮 + 跨浏览器 fullscreenchange 监听
+    // 网页全屏切换：按钮 + Esc 退出
     const fsBtn = $('#dsFullscreen');
-    if (fsBtn) fsBtn.addEventListener('click', toggleFullscreen);
-    [
-      'fullscreenchange',
-      'webkitfullscreenchange',
-      'mozfullscreenchange',
-      'MSFullscreenChange',
-    ].forEach((evt) => document.addEventListener(evt, updateFullscreenBtn));
+    if (fsBtn) fsBtn.addEventListener('click', toggleWebFullscreen);
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && isWebFullscreen()) toggleWebFullscreen();
+    });
     updateFullscreenBtn();
   }
 
