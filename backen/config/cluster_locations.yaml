@@ -1,0 +1,24 @@
+# 集群元数据（经纬度等 Prometheus 无法建模的字段）
+# 与 /api/v1/targets 返回的 labels.cluster 按 id 匹配
+# province 与 china.json 的 properties.name 对齐（用于地图下钻）
+clusters:
+  - id: changsha
+    name: 长沙
+    region: 华中
+    province: 湖南省
+    location: [112.9, 28.2]
+  - id: keda
+    name: 科大
+    region: 华中
+    province: 湖南省
+    location: [113.3, 28.1]
+  - id: shenyang
+    name: 沈阳
+    region: 东北
+    province: 辽宁省
+    location: [123.4, 41.8]
+  - id: zhuzhou
+    name: 株洲
+    region: 华中
+    province: 湖南省
+    location: [113.1, 27.8]

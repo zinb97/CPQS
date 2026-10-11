@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ title or "算力网络服务质量控制原型系统" }}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/variables.css">
+  <link rel="stylesheet" href="/static/css/base.css">
+  <link rel="stylesheet" href="/static/css/layout.css">
+  <link rel="stylesheet" href="/static/css/components.css">
+</head>
+<body>
+  <div class="app-layout">
+    <header class="header">
+      <div class="header__brand">
+        <div class="header__logo">算</div>
+        <span class="header__title">算力网络服务质量控制原型系统</span>
+        <span class="header__tag">试验网环境</span>
+      </div>
+      <div style="flex:1;"></div>
+      <div class="header__user">
+        <div class="header__avatar">研</div>
+        <div class="header__user-info">
+          <span class="header__user-name">研发人员</span>
+          <span class="header__user-role">管理员</span>
+        </div>
+      </div>
+    </header>
+
+    <div class="main-wrapper">
+      <aside class="sidebar" id="sidebar">
+        <button class="sidebar__toggle" id="sidebarToggle" aria-label="折叠侧边栏">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
+            <polyline class="sidebar__toggle-chevron" points="15 18 9 12 15 6"/>
+          </svg>
+        </button>
+        <nav class="sidebar__nav">
+          {% for item in menu_items %}
+          {% set item_active = (item.path == '/' and current_path == '/') or (item.path != '/' and current_path.startswith(item.path)) %}
+          <div class="sidebar__group">
+            <a class="sidebar__item{% if item_active %} sidebar__item--active{% endif %}"
+               href="{{ item.path }}">
+              <span class="sidebar__icon">{{ item.icon | safe }}</span>
+              <span class="sidebar__label">{{ item.label }}</span>
+            </a>
+            {% if item.children and item_active %}
+            <div class="sidebar__children">
+              {% for child in item.children %}
+              <a class="sidebar__subitem{% if current_path == child.path %} sidebar__subitem--active{% endif %}"
+                 href="{{ child.path }}">
+                <span class="sidebar__subicon">{{ child.icon | safe }}</span>
+                <span>{{ child.label }}</span>
+              </a>
+              {% endfor %}
+            </div>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </nav>
+      </aside>
+
+      <main class="main-content">
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+  </div>
+
+  <script src="/static/js/app.js"></script>
+  {% block extra_scripts %}{% endblock %}
+</body>
+</html>

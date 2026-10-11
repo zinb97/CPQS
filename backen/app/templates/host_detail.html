@@ -1,0 +1,580 @@
+{% extends "resource_base.html" %}
+
+{% block resource_content %}
+<div class="resource-padded">
+  <div class="resource-page__header">
+    <div>
+      <a id="backLink" href="/resource/clusters" class="back-link">← 返回集群列表</a>
+      <h1 class="resource-page__title" id="hostTitle">{{ instance }}</h1>
+      <p class="resource-page__subtitle">
+        资源管控中心 / 主机详情 · 时序窗口
+        <select id="windowSelect" class="inline-select">
+          <option value="30m">30 分钟</option>
+          <option value="1h">1 小时</option>
+          <option value="6h">6 小时</option>
+          <option value="24h">24 小时</option>
+        </select>
+      </p>
+    </div>
+    <div class="header-actions">
+      <select id="hostSelect" class="inline-select inline-select--wide"></select>
+      <span class="status status--offline" id="hostStatus" hidden></span>
+    </div>
+  </div>
+
+  <div class="host-detail__top">
+    <div class="metric-card gpu-dependent">
+      <div class="metric-card__header">
+        <span class="metric-card__label">GPU 卡数</span>
+        <div class="metric-card__icon metric-card__icon--blue">●</div>
+      </div>
+      <div class="metric-card__value" id="mGpuCount">—</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-card__header">
+        <span class="metric-card__label">CPU 核数</span>
+        <div class="metric-card__icon metric-card__icon--green">●</div>
+      </div>
+      <div class="metric-card__value" id="mCpuCores">—</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-card__header">
+        <span class="metric-card__label">总内存</span>
+        <div class="metric-card__icon metric-card__icon--purple">●</div>
+      </div>
+      <div class="metric-card__value" id="mMemTot">—</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-card__header">
+        <span class="metric-card__label">磁盘容量</span>
+        <div class="metric-card__icon metric-card__icon--red">●</div>
+      </div>
+      <div class="metric-card__value" id="mDiskTot">—</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-card__header">
+        <span class="metric-card__label">运行进程</span>
+        <div class="metric-card__icon metric-card__icon--yellow">●</div>
+      </div>
+      <div class="metric-card__value" id="mProcs">—</div>
+    </div>
+  </div>
+
+  <div class="host-detail__charts">
+    <div class="chart-card">
+      <div class="chart-card__title">CPU 使用率（%）</div>
+      <div id="chartCpu" class="chart-card__chart"></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-card__title">内存使用率（%）</div>
+      <div id="chartMem" class="chart-card__chart"></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-card__title">负载（1m）</div>
+      <div id="chartLoad" class="chart-card__chart"></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-card__title">CPU 最高温度（°C）</div>
+      <div id="chartTemp" class="chart-card__chart"></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-card__title">磁盘 IO（B/s）</div>
+      <div id="chartDisk" class="chart-card__chart"></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-card__title">网络吞吐（B/s）</div>
+      <div id="chartNet" class="chart-card__chart"></div>
+    </div>
+    <div class="chart-card gpu-dependent">
+      <div class="chart-card__title">GPU 平均利用率（%）</div>
+      <div id="chartGpuUtil" class="chart-card__chart"></div>
+    </div>
+    <div class="chart-card gpu-dependent">
+      <div class="chart-card__title">GPU 最高温度（°C）</div>
+      <div id="chartGpuTemp" class="chart-card__chart"></div>
+    </div>
+    <div class="chart-card gpu-dependent">
+      <div class="chart-card__title">GPU 显存占用（MiB）</div>
+      <div id="chartGpuMem" class="chart-card__chart"></div>
+    </div>
+  </div>
+
+  <div class="host-detail__panels">
+    <div class="panel">
+      <div class="panel__title">抓取与系统信息</div>
+      <dl class="host-info" id="hostInfo">
+        <div><dt>所属集群</dt><dd id="iCluster">—</dd></div>
+        <div><dt>Prometheus 地址</dt><dd id="iInstance">{{ instance }}</dd></div>
+        <div><dt>抓取任务</dt><dd id="iJob">—</dd></div>
+        <div><dt>区域</dt><dd id="iRegion">—</dd></div>
+        <div><dt>省份</dt><dd id="iProvince">—</dd></div>
+        <div><dt>最近抓取时间</dt><dd id="iScrape">—</dd></div>
+        <div><dt>最近错误</dt><dd id="iError" class="host-info__error">—</dd></div>
+        <div><dt>启动时间</dt><dd id="iBoot">—</dd></div>
+      </dl>
+    </div>
+
+    <div class="panel">
+      <div class="panel__title">系统硬件</div>
+      <dl class="host-info" id="hostSystem">
+        <div><dt>操作系统</dt><dd id="iPrettyName">—</dd></div>
+        <div><dt>内核版本</dt><dd id="iKernel">—</dd></div>
+        <div><dt>架构</dt><dd id="iArch">—</dd></div>
+        <div><dt>产品型号</dt><dd id="iProduct">—</dd></div>
+        <div><dt>厂商</dt><dd id="iVendor">—</dd></div>
+        <div><dt>BIOS 版本</dt><dd id="iBios">—</dd></div>
+      </dl>
+    </div>
+  </div>
+</div>
+
+<style>
+  .resource-padded {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    gap: 12px;
+    padding: 16px;
+    overflow: auto;
+  }
+  .resource-page__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    flex-shrink: 0;
+  }
+  .resource-page__title {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    margin: 4px 0 0;
+    font-family: var(--font-mono);
+  }
+  .resource-page__subtitle {
+    font-size: 12px;
+    color: var(--color-text-secondary);
+    margin: 4px 0 0;
+  }
+  .back-link {
+    font-size: 12px;
+    color: var(--color-text-secondary);
+    text-decoration: none;
+  }
+  .back-link:hover { color: var(--color-accent); }
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .inline-select {
+    font-size: 12px;
+    color: var(--color-text-primary);
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    padding: 4px 8px;
+    cursor: pointer;
+    font-family: var(--font-sans, inherit);
+  }
+  .inline-select:hover { border-color: var(--color-accent); }
+  .inline-select--wide { min-width: 200px; }
+  .host-detail__top {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 12px;
+    flex-shrink: 0;
+  }
+  .host-detail__charts {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .chart-card {
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: 12px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-height: 140px;
+  }
+  .chart-card__title {
+    font-size: 11px;
+    color: var(--color-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .chart-card__chart {
+    flex: 1;
+    min-height: 100px;
+    width: 100%;
+  }
+  .host-detail__panels {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .host-info {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0;
+    margin: 0;
+  }
+  .host-info > div {
+    display: grid;
+    grid-template-columns: 110px 1fr;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--color-border);
+    font-size: 12px;
+    align-items: baseline;
+  }
+  .host-info dt {
+    color: var(--color-text-muted);
+    font-size: 11px;
+    margin: 0;
+  }
+  .host-info dd {
+    color: var(--color-text-primary);
+    font-family: var(--font-mono);
+    margin: 0;
+    word-break: break-all;
+  }
+  .host-info__error {
+    color: var(--color-danger);
+  }
+</style>
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js" crossorigin="anonymous"></script>
+<script>
+  const INSTANCE = {{ instance | tojson }};
+  const STATUS_LABEL = { healthy: '运行中', warning: '部分离线', offline: '离线', unknown: '未知' };
+  const STATUS_CLASS = { healthy: 'status--healthy', warning: 'status--warning', offline: 'status--offline', unknown: 'status--offline' };
+
+  function fmtBytes(n) {
+    if (n == null) return '—';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0; while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return n.toFixed(n >= 100 ? 0 : 1) + ' ' + units[i];
+  }
+  function fmtBytesPerSec(n) {
+    return fmtBytes(n) + '/s';
+  }
+  function fmtTime(s) {
+    if (!s) return '—';
+    try { return new Date(s).toLocaleString('zh-CN', { hour12: false }); }
+    catch { return s; }
+  }
+  function fmtBoot(ts) {
+    if (!ts) return '—';
+    try {
+      const d = new Date(ts * 1000);
+      const days = Math.floor((Date.now() / 1000 - ts) / 86400);
+      return `${d.toLocaleString('zh-CN', { hour12: false })} (已运行 ${days} 天)`;
+    } catch { return ts; }
+  }
+  function setText(id, val) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = val == null || val === '' ? '—' : val;
+  }
+
+  // ===== 折线图 =====
+  // 通用配置：共享 xAxis（time），yAxis 按 metric 类型
+  const COLORS = {
+    blue: '#0ea5e9', purple: '#8b5cf6', green: '#10b981',
+    yellow: '#f59e0b', red: '#ef4444',
+  };
+  const CHARTS = {};   // id -> echarts instance
+  let GPU_VISIBLE = false;  // 由 renderDetail 根据 gpu_count 设置
+
+  function baseOption(color) {
+    return {
+      animation: false,
+      grid: { left: 56, right: 12, top: 18, bottom: 22 },
+      tooltip: { trigger: 'axis', transitionDuration: 0 },
+      legend: { show: false },
+      xAxis: {
+        type: 'category',
+        data: [],
+        boundaryGap: false,
+        axisLine: { lineStyle: { color: '#e2e8f0' } },
+        axisLabel: { fontSize: 9, color: '#94a3b8', show: true, hideOverlap: true },
+        axisTick: { show: false },
+      },
+      yAxis: {
+        type: 'value',
+        axisLine: { show: false },
+        axisTick: { show: false },
+        axisLabel: { fontSize: 9, color: '#94a3b8' },
+        splitLine: { lineStyle: { color: '#e2e8f0' } },
+        scale: true,
+      },
+      series: [{
+        type: 'line',
+        smooth: true,
+        showSymbol: false,
+        data: [],
+        lineStyle: { color, width: 2 },
+        itemStyle: { color },
+        areaStyle: {
+          color: {
+            type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+            colorStops: [
+              { offset: 0, color: color + '40' },
+              { offset: 1, color: color + '00' },
+            ],
+          },
+        },
+      }],
+    };
+  }
+
+  function fmtPercent(v) { return v == null ? '—' : v.toFixed(1) + '%'; }
+  function fmtFloat(v) { return v == null ? '—' : v.toFixed(2); }
+  function fmtTemp(v) { return v == null ? '—' : v.toFixed(1) + '°C'; }
+  function fmtBytesChart(v) { return v == null ? '—' : fmtBytes(v) + '/s'; }
+  function fmtMib(v) { return v == null ? '—' : v.toFixed(0) + ' MiB'; }
+
+  function makeChart(id, color, fmtValue, yFormatter) {
+    const el = document.getElementById(id);
+    if (!el || typeof echarts === 'undefined') return null;
+    const chart = echarts.init(el);
+    const opt = baseOption(color);
+    if (yFormatter) {
+      opt.tooltip.valueFormatter = yFormatter;
+      opt.yAxis.axisLabel = {
+        fontSize: 10, color: '#94a3b8', formatter: yFormatter,
+      };
+    }
+    chart.setOption(opt);
+    CHARTS[id] = chart;
+    return chart;
+  }
+
+  function updateChart(id, points) {
+    const chart = CHARTS[id];
+    if (!chart) return;
+    chart.setOption({
+      xAxis: { data: points.map((p) => p.time) },
+      series: [{ data: points.map((p) => p.value) }],
+    });
+  }
+
+  // 多 series 图表（同一图中绘多条线 + 图例）。
+  // seriesMeta: [{name, color}, ...]
+  function makeChartMulti(id, seriesMeta, yFormatter) {
+    const el = document.getElementById(id);
+    if (!el || typeof echarts === 'undefined') return null;
+    const chart = echarts.init(el);
+    const opt = baseOption(seriesMeta[0].color);
+    opt.legend = {
+      show: true, top: 0, right: 8,
+      textStyle: { fontSize: 11, color: '#475569' },
+      icon: 'roundRect',
+      itemWidth: 10, itemHeight: 10,
+    };
+    opt.series = seriesMeta.map((m) => ({
+      name: m.name,
+      type: 'line',
+      smooth: true,
+      showSymbol: false,
+      data: [],
+      lineStyle: { color: m.color, width: 2 },
+      itemStyle: { color: m.color },
+      areaStyle: {
+        color: {
+          type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+          colorStops: [
+            { offset: 0, color: m.color + '30' },
+            { offset: 1, color: m.color + '00' },
+          ],
+        },
+      },
+    }));
+    if (yFormatter) {
+      opt.tooltip.valueFormatter = yFormatter;
+      opt.yAxis.axisLabel = {
+        fontSize: 10, color: '#94a3b8', formatter: yFormatter,
+      };
+    }
+    opt.grid.top = 26;
+    chart.setOption(opt);
+    CHARTS[id] = chart;
+    return chart;
+  }
+
+  // seriesArr: [{name, points: [{time, value}]}, ...]
+  function updateChartMulti(id, seriesArr) {
+    const chart = CHARTS[id];
+    if (!chart) return;
+    const xData = (seriesArr[0]?.points || []).map((p) => p.time);
+    chart.setOption({
+      xAxis: { data: xData },
+      series: seriesArr.map((s) => ({
+        name: s.name,
+        data: (s.points || []).map((p) => p.value),
+      })),
+    });
+  }
+
+  // 初始化 9 个图表（网络 rx/tx 合并为 1）
+  makeChart('chartCpu',     COLORS.blue,   fmtPercent, fmtPercent);
+  makeChart('chartMem',     COLORS.purple, fmtPercent, fmtPercent);
+  makeChart('chartLoad',    COLORS.green,  fmtFloat,   fmtFloat);
+  makeChart('chartTemp',    COLORS.red,    fmtTemp,    fmtTemp);
+  makeChart('chartDisk',    COLORS.yellow, fmtBytesChart, fmtBytesChart);
+  makeChartMulti('chartNet', [
+    { name: '下行', color: COLORS.green },
+    { name: '上行', color: COLORS.blue },
+  ], fmtBytesChart);
+  makeChart('chartGpuUtil', COLORS.purple, fmtPercent, fmtPercent);
+  makeChart('chartGpuTemp', COLORS.red,    fmtTemp,    fmtTemp);
+  makeChart('chartGpuMem',  COLORS.yellow, fmtMib,     fmtMib);
+
+  function resizeAll() {
+    Object.values(CHARTS).forEach((c) => c.resize());
+  }
+  let resizeTimer;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(resizeAll, 100);
+  });
+
+  // ===== 数据拉取 =====
+  async function fetchDetail() {
+    const r = await fetch('/api/metrics/hosts/' + encodeURIComponent(INSTANCE));
+    if (r.status === 404) {
+      document.getElementById('hostTitle').textContent = '主机不存在';
+      return null;
+    }
+    return await r.json();
+  }
+
+  async function fetchTimeseries() {
+    const w = document.getElementById('windowSelect').value || '30m';
+    try {
+      const r = await fetch('/api/metrics/hosts/' + encodeURIComponent(INSTANCE) + '/timeseries?window=' + encodeURIComponent(w));
+      if (!r.ok) return null;
+      return await r.json();
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // 用主机详情响应里的 cluster_hosts 填充下拉框（仅当前集群成员）。
+  function renderHostSwitcher(clusterHosts) {
+    const sel = document.getElementById('hostSelect');
+    const opts = [];
+    (clusterHosts || []).forEach((h) => {
+      const label = (h.instance || '').replace(/:\d+$/, '');
+      const selAttr = h.instance === INSTANCE ? ' selected' : '';
+      const offlineTag = h.health === 'up' ? '' : ' （离线）';
+      opts.push(`<option value="${h.instance}"${selAttr}>${label}${offlineTag}</option>`);
+    });
+    sel.innerHTML = opts.join('');
+  }
+
+  function renderDetail(d) {
+    document.getElementById('hostTitle').textContent = (d.instance || '').replace(/:\d+$/, '');
+    setText('mGpuCount', d.gpu_count > 0 ? d.gpu_count + ' 卡' : '—');
+    setText('mCpuCores', d.cpu_cores != null ? d.cpu_cores + ' 核' : '—');
+    setText('mMemTot', fmtBytes(d.mem_total_bytes));
+    setText('mDiskTot', d.disk_total_bytes != null ? fmtBytes(d.disk_total_bytes) : '—');
+    setText('mProcs', d.procs_running);
+
+    // 用同集群其他主机填充下拉框（仅详情响应中包含，避免额外请求）
+    if (Array.isArray(d.cluster_hosts)) {
+      renderHostSwitcher(d.cluster_hosts);
+    }
+
+    // GPU 可见性：gpu_count === 0 时隐藏相关卡片与图表
+    GPU_VISIBLE = (d.gpu_count || 0) > 0;
+    document.querySelectorAll('.gpu-dependent').forEach((el) => {
+      el.hidden = !GPU_VISIBLE;
+    });
+
+    setText('iCluster', d.cluster_name || d.cluster_id || '—');
+    setText('iJob', d.job);
+    setText('iRegion', d.region || '—');
+    setText('iProvince', d.province || '—');
+    setText('iScrape', fmtTime(d.last_scrape));
+    setText('iError', d.last_error || '无');
+    setText('iBoot', fmtBoot(d.boot_time));
+
+    const u = d.uname || {};
+    const o = d.os || {};
+    const m = d.dmi || {};
+    setText('iPrettyName', o.pretty_name || o.name || '—');
+    setText('iKernel', u.release || '—');
+    setText('iArch', u.machine || '—');
+    setText('iProduct', m.product_name || '—');
+    setText('iVendor', m.system_vendor || '—');
+    setText('iBios', m.bios_version || '—');
+
+    const status = d.health || 'unknown';
+    const badge = document.getElementById('hostStatus');
+    badge.hidden = false;
+    badge.className = 'status ' + (STATUS_CLASS[status] || 'status--offline');
+    badge.textContent = STATUS_LABEL[status] || status;
+
+    if (d.cluster_id) {
+      const back = document.getElementById('backLink');
+      back.href = '/resource/clusters/' + encodeURIComponent(d.cluster_id);
+      back.textContent = '← 返回集群 ' + (d.cluster_name || d.cluster_id);
+    }
+  }
+
+  function renderTimeseries(ts) {
+    if (!ts || !ts.series) return;
+    const s = ts.series;
+    updateChart('chartCpu',     s.cpu_usage || []);
+    updateChart('chartMem',     s.mem_usage || []);
+    updateChart('chartLoad',    s.load1 || []);
+    updateChart('chartTemp',    s.max_temp_c || []);
+    updateChart('chartDisk',    s.disk_io || []);
+    updateChartMulti('chartNet', [
+      { name: '下行', points: s.net_rx || [] },
+      { name: '上行', points: s.net_tx || [] },
+    ]);
+    if (GPU_VISIBLE) {
+      updateChart('chartGpuUtil', s.gpu_util || []);
+      updateChart('chartGpuTemp', s.gpu_max_temp_c || []);
+      updateChart('chartGpuMem',  s.gpu_mem_used || []);
+    }
+  }
+
+  async function refreshDetail() {
+    try {
+      const d = await fetchDetail();
+      if (d) renderDetail(d);
+    } catch (e) {
+      console.error('主机详情加载失败:', e);
+    }
+  }
+
+  async function refreshTimeseries() {
+    const ts = await fetchTimeseries();
+    renderTimeseries(ts);
+  }
+
+  // 时序窗口切换：立即重拉一次（不清空现有图表以保持视觉连续性）
+  document.getElementById('windowSelect').addEventListener('change', () => {
+    refreshTimeseries();
+  });
+
+  // 主机切换：跳转到新主机的详情页（让服务端重新渲染模板最简单）
+  document.getElementById('hostSelect').addEventListener('change', (e) => {
+    const v = e.target.value;
+    if (v && v !== INSTANCE) {
+      location.href = '/resource/hosts/' + encodeURIComponent(v);
+    }
+  });
+
+  refreshDetail();
+  refreshTimeseries();
+  setInterval(refreshDetail, 10000);
+  setInterval(refreshTimeseries, 10000);
+</script>
+{% endblock %}

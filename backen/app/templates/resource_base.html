@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+
+{# 资源管控中心公共布局：仅提供内容容器。 #}
+{# 顶部子导航由侧边栏渲染（menu.children）。 #}
+{# 子页面继承本模板并填充 {% block resource_content %}。 #}
+
+{% block content %}
+<div class="resource-page">
+  {% block resource_content %}{% endblock %}
+</div>
+
+<style>
+  .resource-page {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+  }
+</style>
+{% endblock %}

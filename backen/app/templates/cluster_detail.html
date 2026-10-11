@@ -1,0 +1,268 @@
+{% extends "resource_base.html" %}
+
+{% block resource_content %}
+<div class="resource-padded">
+  <div class="resource-page__header">
+    <div>
+      <a href="/resource/clusters" class="back-link">← 返回集群列表</a>
+      <h1 class="resource-page__title" id="clusterTitle">{{ cluster_id }}</h1>
+      <p class="resource-page__subtitle">资源管控中心 / 集群详情</p>
+    </div>
+    <span class="status status--offline" id="clusterStatus" hidden></span>
+  </div>
+
+  <div class="cluster-detail__metrics">
+    <div class="metric-card">
+      <div class="metric-card__header">
+        <span class="metric-card__label">CPU 使用率</span>
+        <div class="metric-card__icon metric-card__icon--blue">●</div>
+      </div>
+      <div class="metric-card__value" id="mCpu">—</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-card__header">
+        <span class="metric-card__label">内存使用率</span>
+        <div class="metric-card__icon metric-card__icon--purple">●</div>
+      </div>
+      <div class="metric-card__value" id="mMem">—</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-card__header">
+        <span class="metric-card__label">负载 (1m)</span>
+        <div class="metric-card__icon metric-card__icon--green">●</div>
+      </div>
+      <div class="metric-card__value" id="mLoad">—</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-card__header">
+        <span class="metric-card__label">最高温度</span>
+        <div class="metric-card__icon metric-card__icon--red">●</div>
+      </div>
+      <div class="metric-card__value" id="mTemp">—</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-card__header">
+        <span class="metric-card__label">CPU 核数</span>
+        <div class="metric-card__icon metric-card__icon--yellow">●</div>
+      </div>
+      <div class="metric-card__value" id="mCores">—</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-card__header">
+        <span class="metric-card__label">总内存</span>
+        <div class="metric-card__icon metric-card__icon--purple">●</div>
+      </div>
+      <div class="metric-card__value" id="mMemTot">—</div>
+    </div>
+  </div>
+
+  <div class="panel" style="flex:1;min-height:0;">
+    <div class="panel__title">节点列表</div>
+    <div class="nodes-wrap">
+      <table class="nodes-table" id="nodesTable">
+        <thead>
+          <tr>
+            <th>地址</th>
+            <th>状态</th>
+            <th>CPU</th>
+            <th>内存</th>
+            <th>负载</th>
+            <th>温度</th>
+            <th>进程数</th>
+            <th>GPU</th>
+            <th>最近抓取</th>
+          </tr>
+        </thead>
+        <tbody><tr><td colspan="9" class="nodes-table__empty">加载中...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<style>
+  .resource-padded {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    gap: 16px;
+    padding: 16px;
+    overflow: hidden;
+  }
+  .resource-page__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    flex-shrink: 0;
+  }
+  .resource-page__title {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    margin: 4px 0 0;
+  }
+  .resource-page__subtitle {
+    font-size: 12px;
+    color: var(--color-text-secondary);
+    margin: 4px 0 0;
+  }
+  .back-link {
+    font-size: 12px;
+    color: var(--color-text-secondary);
+    text-decoration: none;
+  }
+  .back-link:hover { color: var(--color-accent); }
+  .cluster-detail__metrics {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 12px;
+    flex-shrink: 0;
+  }
+  .nodes-wrap {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+  .nodes-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  .nodes-table thead th {
+    text-align: left;
+    font-weight: 500;
+    color: var(--color-text-secondary);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-bg-secondary);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
+  .nodes-table tbody td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--color-border);
+    color: var(--color-text-primary);
+    font-family: var(--font-mono);
+  }
+  .nodes-table tbody tr {
+    cursor: pointer;
+    transition: background var(--transition-fast);
+  }
+  .nodes-table tbody tr:hover {
+    background: var(--color-bg-card-hover);
+  }
+  .nodes-table__empty {
+    text-align: center;
+    padding: 24px !important;
+    color: var(--color-text-muted);
+  }
+  .mem-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .mem-cell__bar {
+    width: 60px;
+    height: 4px;
+    background: var(--color-bg-secondary);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .mem-cell__fill {
+    height: 100%;
+    background: var(--color-accent);
+  }
+</style>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+  const CLUSTER_ID = {{ cluster_id | tojson }};
+  const STATUS_LABEL = { healthy: '运行中', warning: '部分离线', offline: '离线', unknown: '未知' };
+  const STATUS_CLASS = { healthy: 'status--healthy', warning: 'status--warning', offline: 'status--offline', unknown: 'status--offline' };
+
+  function fmtBytes(n) {
+    if (n == null) return '—';
+    const units = ['B', 'KB', 'GB', 'TB', 'PB'];
+    let i = 0; while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return n.toFixed(n >= 100 ? 0 : 1) + ' ' + units[i];
+  }
+  function fmtTime(s) {
+    if (!s) return '—';
+    try { return new Date(s).toLocaleString('zh-CN', { hour12: false }); }
+    catch { return s; }
+  }
+  function pct(v) { return v == null ? '—' : v.toFixed(1) + '%'; }
+
+  function render(nodes) {
+    const tbody = document.querySelector('#nodesTable tbody');
+    if (!nodes || !nodes.length) {
+      tbody.innerHTML = '<tr><td colspan="9" class="nodes-table__empty">该集群下暂无节点</td></tr>';
+      return;
+    }
+    tbody.innerHTML = nodes.map((n) => {
+      const health = n.health || 'unknown';
+      const memWidth = n.mem_usage != null ? Math.min(100, n.mem_usage) : 0;
+      const addr = (n.instance || '—').replace(/:\d+$/, '');
+      const gpuCell = n.gpu_count > 0
+        ? `<strong>${n.gpu_count}</strong> 卡<br><span style="font-size:10px;color:var(--color-text-muted);">${n.gpu_util == null ? '—' : n.gpu_util.toFixed(0) + '%'}${n.gpu_max_temp_c != null ? ' · ' + n.gpu_max_temp_c.toFixed(0) + '°C' : ''}</span>`
+        : '<span style="color:var(--color-text-muted);">—</span>';
+      return `<tr data-instance="${n.instance}">
+        <td>${addr}</td>
+        <td><span class="status ${STATUS_CLASS[health] || 'status--offline'}">${STATUS_LABEL[health] || health}</span></td>
+        <td>${pct(n.cpu_usage)}</td>
+        <td>
+          <div class="mem-cell">
+            <span>${pct(n.mem_usage)}</span>
+            <span style="font-size:10px;color:var(--color-text-muted);">${fmtBytes(n.mem_used_bytes)} / ${fmtBytes(n.mem_total_bytes)}</span>
+            <div class="mem-cell__bar"><div class="mem-cell__fill" style="width:${memWidth}%"></div></div>
+          </div>
+        </td>
+        <td>${n.load1 == null ? '—' : n.load1.toFixed(2)}</td>
+        <td>${n.max_temp_c == null ? '—' : n.max_temp_c.toFixed(1) + '°C'}</td>
+        <td>${n.procs_running ?? '—'}</td>
+        <td>${gpuCell}</td>
+        <td style="font-size:11px;color:var(--color-text-secondary);">${fmtTime(n.last_scrape)}</td>
+      </tr>`;
+    }).join('');
+    tbody.querySelectorAll('tr[data-instance]').forEach((tr) => {
+      tr.addEventListener('click', () => {
+        const inst = tr.dataset.instance;
+        if (inst) location.href = '/resource/hosts/' + encodeURIComponent(inst);
+      });
+    });
+  }
+
+  async function refresh() {
+    try {
+      const r = await fetch('/api/metrics/clusters/' + encodeURIComponent(CLUSTER_ID));
+      if (r.status === 404) {
+        document.getElementById('clusterTitle').textContent = '集群不存在';
+        return;
+      }
+      const d = await r.json();
+      document.getElementById('clusterTitle').textContent = d.name || d.id;
+      document.getElementById('mCpu').textContent = pct(d.cpu_usage);
+      document.getElementById('mMem').textContent = pct(d.mem_usage);
+      document.getElementById('mLoad').textContent = d.load1 == null ? '—' : d.load1.toFixed(2);
+      document.getElementById('mTemp').textContent = d.max_temp_c == null ? '—' : d.max_temp_c.toFixed(1) + '°C';
+      document.getElementById('mCores').textContent = d.cpu_cores ?? '—';
+      document.getElementById('mMemTot').textContent = fmtBytes(d.mem_total_bytes);
+      const status = d.status || 'unknown';
+      const badge = document.getElementById('clusterStatus');
+      badge.hidden = false;
+      badge.className = 'status ' + (STATUS_CLASS[status] || 'status--offline');
+      badge.textContent = STATUS_LABEL[status] || status;
+      render(d.nodes || []);
+    } catch (e) {
+      console.error('集群详情加载失败:', e);
+    }
+  }
+
+  refresh();
+  setInterval(refresh, 10000);
+</script>
+{% endblock %}

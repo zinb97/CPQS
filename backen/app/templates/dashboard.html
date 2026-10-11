@@ -1,0 +1,262 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="dashboard">
+  <div class="dashboard__header">
+    <h1 class="dashboard__title">算力网络服务质量态势总览</h1>
+    <div class="dashboard__header-right">
+      <span id="systemTime" data-clock></span>
+    </div>
+  </div>
+
+  {% if not prom_ok %}
+  <div class="dashboard__alert" role="alert">
+    <strong>Prometheus 不可用</strong>，指标展示为降级数据。检查 <code>{{ prometheus_url }}</code>。
+  </div>
+  {% endif %}
+
+  <div class="dashboard__body">
+    <div class="dashboard__left">
+      <div class="panel">
+        <div class="panel__title">算力资源态势</div>
+        <div class="panel__metrics"
+             id="grafanaMetrics"
+             data-endpoint="/api/metrics/overview"
+             data-keys='["online_clusters","online_nodes","cpu_cores","memory_total"]'
+             data-labels='["在线集群数","在线节点数","CPU总核心数","内存总量"]'
+             data-icons='["nodes","server","cpu","memory"]'
+             data-colors='["blue","green","yellow","purple"]'
+             data-formats='["plain","combined:total_nodes","plain","plain"]'>
+          <div class="loading"><div class="loading__spinner"></div></div>
+        </div>
+        <div class="panel__charts-grid">
+          <div class="panel__chart-iframe">
+            <iframe src="http://192.168.10.31:3000/d-solo/cluster-overview-dashboard/%E8%AE%A1%E7%AE%97%E8%B5%84%E6%BA%90%E7%BB%84%E8%B5%84%E6%BA%90%E6%80%81%E5%8A%BF%E5%A4%A7%E7%9B%98?orgId=1&timezone=browser&refresh=10s&theme=light&panelId=panel-14&hideLogo=true"
+                    width="278" height="200" frameborder="0"
+                    sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
+          </div>
+          <div class="panel__chart-iframe">
+            <iframe src="http://192.168.10.31:3000/d-solo/cluster-overview-dashboard/%E8%AE%A1%E7%AE%97%E8%B5%84%E6%BA%90%E7%BB%84%E8%B5%84%E6%BA%90%E6%80%81%E5%8A%BF%E5%A4%A7%E7%9B%98?orgId=1&timezone=browser&refresh=10s&theme=light&panelId=panel-18&hideLogo=true"
+                    width="278" height="200" frameborder="0"
+                    sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dashboard__center">
+      <button id="mapBack" class="map-back" hidden type="button">← 返回全国</button>
+      <div id="geoMap" data-endpoint="/api/metrics/map"></div>
+    </div>
+
+    <div class="dashboard__right">
+      <div class="panel">
+        <div class="panel__title">网络资源态势</div>
+        <div class="panel__metrics"
+             id="networkMetrics"
+             data-endpoint="/api/metrics/overview"
+             data-keys='["switches","links","hosts","packet_in"]'
+             data-labels='["交换机数","网络链路数","网络主机数","packet-in事件数"]'
+             data-icons='["switch","link","host","packet"]'
+             data-colors='["blue","green","yellow","purple"]'>
+          <div class="loading"><div class="loading__spinner"></div></div>
+        </div>
+        <div class="panel__charts-grid">
+          <div class="panel__chart-iframe">
+            <iframe src="http://192.168.10.31:3000/d-solo/cluster-overview-dashboard/%E8%AE%A1%E7%AE%97%E8%B5%84%E6%BA%90%E7%BB%84%E8%B5%84%E6%BA%90%E6%80%81%E5%8A%BF%E5%A4%A7%E7%9B%98?orgId=1&timezone=browser&refresh=10s&theme=light&panelId=panel-30&hideLogo=true"
+                    width="278" height="200" frameborder="0"
+                    sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
+          </div>
+          <div class="panel__chart-iframe">
+            <iframe src="http://192.168.10.31:3000/d-solo/cluster-overview-dashboard/%E8%AE%A1%E7%AE%97%E8%B5%84%E6%BA%90%E7%BB%84%E8%B5%84%E6%BA%90%E6%80%81%E5%8A%BF%E5%A4%A7%E7%9B%98?orgId=1&timezone=browser&refresh=10s&theme=light&panelId=panel-29&hideLogo=true"
+                    width="278" height="200" frameborder="0"
+                    sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="dashboard__footer">
+    <div class="dashboard__footer-section">
+      <span class="dashboard__stat-label">带宽趋势（24h）</span>
+      <div id="bandwidthTrend" class="dashboard__mini-chart" data-endpoint="/api/metrics/bandwidth"></div>
+    </div>
+    <div class="dashboard__footer-section">
+      <span class="dashboard__stat-label">网络切片</span>
+      <div id="sliceChart" class="dashboard__mini-chart dashboard__mini-chart--donut" data-endpoint="/api/metrics/slices"></div>
+    </div>
+    <div class="dashboard__footer-section">
+      <span class="dashboard__stat-label">链路质量</span>
+      <ul id="linkQuality" class="dashboard__list" data-endpoint="/api/metrics/links"></ul>
+    </div>
+    <div class="dashboard__footer-section">
+      <span class="dashboard__stat-label">QoS 策略</span>
+      <ul id="qosOverview" class="dashboard__list" data-endpoint="/api/metrics/policies"></ul>
+    </div>
+  </div>
+</div>
+
+<style>
+  .dashboard {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    gap: 12px;
+  }
+  .dashboard__alert {
+    padding: 8px 12px;
+    background: rgba(239, 68, 68, 0.1);
+    color: var(--color-danger);
+    border-left: 3px solid var(--color-danger);
+    border-radius: var(--radius-md);
+    font-size: 13px;
+  }
+  .dashboard__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 8px;
+    flex-shrink: 0;
+  }
+  .dashboard__title {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+  .dashboard__header-right {
+    font-size: 13px;
+    color: var(--color-text-secondary);
+    font-family: var(--font-mono);
+  }
+  .dashboard__body {
+    display: flex;
+    gap: 12px;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .dashboard__left, .dashboard__right {
+    width: 280px;
+    flex-shrink: 0;
+    overflow: hidden;
+  }
+  .dashboard__center {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    position: relative;
+  }
+  #geoMap {
+    width: 100%;
+    height: 100%;
+  }
+  .map-back {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 10;
+    padding: 4px 10px;
+    font-size: 12px;
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    color: var(--color-text-primary);
+    cursor: pointer;
+  }
+  .map-back:hover {
+    background: var(--color-bg-card-hover);
+    border-color: var(--color-accent);
+  }
+  .dashboard__footer {
+    display: flex;
+    gap: 12px;
+    align-items: stretch;
+    padding: 8px 12px;
+    background: var(--color-bg-card);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--color-border);
+    height: 100px;
+    flex-shrink: 0;
+  }
+  .dashboard__footer-section {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .dashboard__stat-label {
+    font-size: 11px;
+    color: var(--color-text-secondary);
+  }
+  .dashboard__mini-chart {
+    flex: 1;
+    min-height: 0;
+  }
+  .dashboard__list {
+    flex: 1;
+    overflow-y: auto;
+    font-size: 11px;
+    color: var(--color-text-secondary);
+    margin: 0;
+    padding: 0;
+  }
+  .dashboard__list li {
+    padding: 2px 0;
+    border-bottom: 1px solid var(--color-border);
+    display: flex;
+    justify-content: space-between;
+  }
+  .panel {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    overflow-y: auto;
+  }
+  .panel__title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--color-border);
+  }
+  .panel__metrics {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .panel__charts-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .panel__chart-iframe {
+    background: var(--color-bg-secondary);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+  }
+  .panel__chart-iframe iframe {
+    display: block;
+  }
+</style>
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"
+        integrity="" crossorigin="anonymous"></script>
+<script>
+  window.__DASHBOARD_CONFIG__ = {
+    prometheusUrl: {{ prometheus_url | tojson }},
+    initialBandwidth: {{ initial_bandwidth | tojson }},
+    cardsRefreshMs: {{ cards_refresh_s }} * 1000,
+    chartsRefreshMs: {{ charts_refresh_s }} * 1000,
+  };
+</script>
+<script src="/static/js/dashboard.js"></script>
+{% endblock %}

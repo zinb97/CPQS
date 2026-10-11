@@ -1,0 +1,1155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>算力网络服务质量控制系统</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+<style>
+  :root {
+    --bg-deep: #03070f;
+    --bg-mid: #061229;
+    --panel-bg: rgba(8, 26, 58, 0.55);
+    --panel-border: rgba(0, 229, 255, 0.35);
+    --panel-border-soft: rgba(0, 229, 255, 0.18);
+    --cyan: #00e5ff;
+    --cyan-dim: #1a8a9c;
+    --green: #00ff9d;
+    --orange: #ffb347;
+    --red: #ff5577;
+    --purple: #b388ff;
+    --text: #d8ecff;
+    --text-dim: #6e88ad;
+    --grid: rgba(0, 229, 255, 0.07);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    width: 100%;
+    height: 100%;
+    background: var(--bg-deep);
+    color: var(--text);
+    font-family: "Microsoft YaHei", "PingFang SC", "Helvetica Neue", sans-serif;
+    overflow: hidden;
+  }
+
+  /* ====== 背景层 ====== */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    background:
+      radial-gradient(ellipse at 50% 0%, rgba(0, 80, 140, 0.35), transparent 60%),
+      radial-gradient(ellipse at 20% 80%, rgba(0, 90, 110, 0.25), transparent 60%),
+      radial-gradient(ellipse at 85% 80%, rgba(60, 0, 110, 0.25), transparent 60%),
+      linear-gradient(180deg, #03070f 0%, #04102a 100%);
+    z-index: -2;
+  }
+
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 60px 60px;
+    z-index: -1;
+    animation: gridMove 40s linear infinite;
+  }
+
+  @keyframes gridMove {
+    0% { background-position: 0 0, 0 0; }
+    100% { background-position: 60px 60px, 60px 60px; }
+  }
+
+  /* ====== 装饰粒子 ====== */
+  .particles {
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    overflow: hidden;
+  }
+  .particle {
+    position: absolute;
+    width: 2px;
+    height: 2px;
+    background: var(--cyan);
+    border-radius: 50%;
+    box-shadow: 0 0 6px var(--cyan);
+    opacity: 0;
+    animation: floatUp 8s linear infinite;
+  }
+
+  @keyframes floatUp {
+    0% { transform: translateY(100vh); opacity: 0; }
+    10% { opacity: 0.8; }
+    90% { opacity: 0.8; }
+    100% { transform: translateY(-10vh); opacity: 0; }
+  }
+
+  /* ====== 布局 ====== */
+  .dashboard {
+    width: 100vw;
+    height: 100vh;
+    padding: 16px 24px;
+    display: grid;
+    grid-template-rows: 78px 96px 1fr 60px;
+    gap: 14px;
+  }
+
+  /* ====== 头部 ====== */
+  .header {
+    position: relative;
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    padding: 0 20px;
+  }
+
+  .header::before, .header::after {
+    content: "";
+    position: absolute;
+    bottom: 0;
+    height: 2px;
+    width: 35%;
+    background: linear-gradient(90deg, transparent, var(--cyan), transparent);
+  }
+  .header::before { left: 0; }
+  .header::after { right: 0; transform: scaleX(-1); }
+
+  .header-left, .header-right {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    font-size: 14px;
+    color: var(--text-dim);
+  }
+  .header-right { justify-content: flex-end; }
+
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 10px var(--green);
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.6; transform: scale(1.2); }
+  }
+
+  .title-wrap {
+    text-align: center;
+    position: relative;
+  }
+  .title-wrap h1 {
+    font-size: 36px;
+    font-weight: 700;
+    letter-spacing: 6px;
+    background: linear-gradient(180deg, #ffffff 0%, var(--cyan) 60%, #0099c2 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    text-shadow: 0 0 30px rgba(0, 229, 255, 0.4);
+    position: relative;
+  }
+  .title-en {
+    font-size: 11px;
+    color: var(--text-dim);
+    letter-spacing: 4px;
+    margin-top: 4px;
+    text-transform: uppercase;
+  }
+  .title-deco {
+    display: inline-block;
+    color: var(--cyan);
+    font-size: 22px;
+    margin: 0 14px;
+    opacity: 0.7;
+  }
+
+  /* ====== KPI 条 ====== */
+  .kpi-strip {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 14px;
+  }
+  .kpi-card {
+    position: relative;
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    padding: 14px 20px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    overflow: hidden;
+    clip-path: polygon(0 0, calc(100% - 18px) 0, 100% 18px, 100% 100%, 18px 100%, 0 calc(100% - 18px));
+  }
+  .kpi-card::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, rgba(0, 229, 255, 0.08), transparent);
+    pointer-events: none;
+  }
+  .kpi-icon {
+    width: 56px;
+    height: 56px;
+    border: 1px solid var(--panel-border);
+    display: grid;
+    place-items: center;
+    color: var(--cyan);
+    font-size: 26px;
+    background: rgba(0, 229, 255, 0.06);
+  }
+  .kpi-data {
+    flex: 1;
+    min-width: 0;
+  }
+  .kpi-label {
+    font-size: 13px;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+    margin-bottom: 6px;
+  }
+  .kpi-value {
+    font-family: "DIN Alternate", "Consolas", monospace;
+    font-size: 30px;
+    font-weight: 700;
+    color: #fff;
+    text-shadow: 0 0 12px rgba(0, 229, 255, 0.6);
+    line-height: 1;
+  }
+  .kpi-unit {
+    font-size: 13px;
+    color: var(--cyan);
+    margin-left: 4px;
+  }
+  .kpi-trend {
+    font-size: 12px;
+    margin-top: 4px;
+    color: var(--green);
+  }
+  .kpi-trend.down { color: var(--orange); }
+
+  /* ====== 主体三栏 ====== */
+  .main {
+    display: grid;
+    grid-template-columns: 360px 1fr 360px;
+    gap: 14px;
+    min-height: 0;
+  }
+
+  .col {
+    display: grid;
+    grid-template-rows: 1fr 1fr;
+    gap: 14px;
+    min-height: 0;
+  }
+
+  /* ====== 面板通用 ====== */
+  .panel {
+    position: relative;
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border-soft);
+    backdrop-filter: blur(6px);
+    padding: 14px 16px 12px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .panel::before, .panel::after {
+    content: "";
+    position: absolute;
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--cyan);
+  }
+  .panel::before { top: -1px; left: -1px; border-right: none; border-bottom: none; }
+  .panel::after { bottom: -1px; right: -1px; border-left: none; border-top: none; }
+  .panel .corner-tr, .panel .corner-bl {
+    position: absolute;
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--cyan);
+  }
+  .panel .corner-tr { top: -1px; right: -1px; border-left: none; border-bottom: none; }
+  .panel .corner-bl { bottom: -1px; left: -1px; border-right: none; border-top: none; }
+
+  .panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+    padding-bottom: 6px;
+    border-bottom: 1px dashed var(--panel-border-soft);
+  }
+  .panel-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--cyan);
+    letter-spacing: 2px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .panel-title::before {
+    content: "";
+    width: 4px;
+    height: 14px;
+    background: linear-gradient(180deg, var(--cyan), transparent);
+  }
+  .panel-tag {
+    font-size: 11px;
+    color: var(--text-dim);
+    border: 1px solid var(--panel-border-soft);
+    padding: 2px 8px;
+  }
+
+  .panel-body {
+    flex: 1;
+    min-height: 0;
+    position: relative;
+  }
+  .chart { width: 100%; height: 100%; }
+
+  /* ====== 中央地图区 ====== */
+  .map-panel {
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    min-height: 0;
+  }
+  .map-stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px dashed var(--panel-border-soft);
+    margin-bottom: 8px;
+  }
+  .map-stat {
+    text-align: center;
+    padding: 6px 4px;
+    background: rgba(0, 229, 255, 0.04);
+    border: 1px solid var(--panel-border-soft);
+  }
+  .map-stat .v {
+    font-family: "DIN Alternate", monospace;
+    font-size: 22px;
+    color: #fff;
+    font-weight: 700;
+    text-shadow: 0 0 10px var(--cyan);
+  }
+  .map-stat .v small { font-size: 12px; color: var(--cyan); margin-left: 2px; }
+  .map-stat .l { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+
+  .map-stage {
+    position: relative;
+    overflow: hidden;
+  }
+
+  /* 地图底部装饰条 */
+  .map-legend {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--panel-border-soft);
+    display: flex;
+    justify-content: space-around;
+    align-items: center;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    box-shadow: 0 0 8px currentColor;
+  }
+  .legend-dot.normal { background: var(--green); color: var(--green); }
+  .legend-dot.busy { background: var(--cyan); color: var(--cyan); }
+  .legend-dot.warn { background: var(--orange); color: var(--orange); }
+  .legend-dot.alert { background: var(--red); color: var(--red); }
+
+  /* ====== 底部告警 ====== */
+  .footer {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+  .alert-bar {
+    position: relative;
+    overflow: hidden;
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border-soft);
+    padding: 0 20px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .alert-label {
+    flex-shrink: 0;
+    padding: 6px 14px;
+    background: linear-gradient(90deg, rgba(255, 85, 119, 0.25), transparent);
+    border: 1px solid var(--red);
+    color: var(--red);
+    font-size: 13px;
+    letter-spacing: 2px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .alert-label .status-dot { background: var(--red); box-shadow: 0 0 10px var(--red); }
+
+  .alert-marquee {
+    flex: 1;
+    overflow: hidden;
+    white-space: nowrap;
+    font-size: 13px;
+  }
+  .alert-marquee span {
+    display: inline-block;
+    padding-left: 100%;
+    animation: marquee 40s linear infinite;
+    color: var(--text);
+  }
+  .alert-marquee span i { color: var(--orange); font-style: normal; margin: 0 6px; }
+  @keyframes marquee {
+    0% { transform: translateX(0); }
+    100% { transform: translateX(-100%); }
+  }
+
+  .node-list {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 0 20px;
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border-soft);
+    font-size: 13px;
+  }
+  .node-list .label {
+    color: var(--cyan);
+    letter-spacing: 2px;
+    padding-right: 14px;
+    border-right: 1px solid var(--panel-border-soft);
+  }
+  .node-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px;
+    border: 1px solid var(--panel-border-soft);
+    background: rgba(0, 229, 255, 0.05);
+    font-family: "Consolas", monospace;
+  }
+  .node-pill .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    box-shadow: 0 0 6px currentColor;
+  }
+  .node-pill.up { color: var(--green); }
+  .node-pill.warn { color: var(--orange); }
+  .node-pill.down { color: var(--red); }
+
+  /* ====== ECharts 地图样式 ====== */
+  #chartMap {
+    width: 100%;
+    height: 100%;
+  }
+  .map-stage {
+    background:
+      radial-gradient(ellipse at 50% 50%, rgba(0, 60, 110, 0.18), transparent 70%);
+  }
+
+  /* ====== 节点列表样式 ====== */
+  .compute-list {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 6px;
+    font-size: 13px;
+  }
+  .compute-row {
+    display: grid;
+    grid-template-columns: 60px 1fr 70px 50px;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px;
+    background: rgba(0, 229, 255, 0.04);
+    border-left: 2px solid var(--cyan);
+  }
+  .compute-row .rank {
+    color: var(--cyan);
+    font-family: "Consolas", monospace;
+    font-weight: 700;
+  }
+  .compute-row .name { color: var(--text); }
+  .compute-row .bar {
+    height: 6px;
+    background: rgba(0, 229, 255, 0.1);
+    position: relative;
+    overflow: hidden;
+  }
+  .compute-row .bar::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    width: var(--w, 50%);
+    background: linear-gradient(90deg, var(--cyan), var(--green));
+    box-shadow: 0 0 6px var(--cyan);
+  }
+  .compute-row .pct {
+    text-align: right;
+    font-family: "Consolas", monospace;
+    color: var(--green);
+  }
+
+  /* ====== 响应式提示 ====== */
+  .scale-tip {
+    position: fixed;
+    bottom: 6px;
+    right: 12px;
+    font-size: 11px;
+    color: var(--text-dim);
+    z-index: 10;
+    opacity: 0.6;
+  }
+</style>
+</head>
+<body>
+
+<div class="particles" id="particles"></div>
+
+<div class="dashboard">
+
+  <!-- ========== HEADER ========== -->
+  <header class="header">
+    <div class="header-left">
+      <span class="status-dot"></span>
+      <span>系统运行正常</span>
+      <span style="opacity:0.6">|</span>
+      <span>运维节点: <b style="color:var(--cyan)">CN-NORTH-01</b></span>
+      <span style="opacity:0.6">|</span>
+      <span>SLA: <b style="color:var(--green)">99.987%</b></span>
+    </div>
+    <div class="title-wrap">
+      <h1><span class="title-deco">⬡</span>算力网络服务质量控制系统<span class="title-deco">⬡</span></h1>
+      <div class="title-en">COMPUTING POWER NETWORK · SERVICE QUALITY CONTROL PLATFORM</div>
+    </div>
+    <div class="header-right">
+      <span id="dateText">2026-10-06</span>
+      <span id="weekText" style="opacity:0.6">星期一</span>
+      <span id="timeText" style="color:var(--cyan);font-family:Consolas,monospace;font-size:18px;letter-spacing:2px;">14:32:15</span>
+    </div>
+  </header>
+
+  <!-- ========== KPI ========== -->
+  <section class="kpi-strip">
+    <div class="kpi-card">
+      <div class="kpi-icon">⚡</div>
+      <div class="kpi-data">
+        <div class="kpi-label">总算力规模</div>
+        <div class="kpi-value"><span id="kpiCompute">128.6</span><span class="kpi-unit">EFLOPS</span></div>
+        <div class="kpi-trend">▲ 较昨日 +2.4%</div>
+      </div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-icon">▣</div>
+      <div class="kpi-data">
+        <div class="kpi-label">算力调度中心</div>
+        <div class="kpi-value"><span id="kpiCenter">36</span><span class="kpi-unit">个</span></div>
+        <div class="kpi-trend">覆盖 31 省级行政区</div>
+      </div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-icon">◈</div>
+      <div class="kpi-data">
+        <div class="kpi-label">在线边缘节点</div>
+        <div class="kpi-value"><span id="kpiNode">4128</span><span class="kpi-unit">/ 4216</span></div>
+        <div class="kpi-trend">▲ 在线率 97.87%</div>
+      </div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-icon">⌬</div>
+      <div class="kpi-data">
+        <div class="kpi-label">网络平均时延</div>
+        <div class="kpi-value"><span id="kpiLatency">12.6</span><span class="kpi-unit">ms</span></div>
+        <div class="kpi-trend down">▼ 较上周 -1.8ms</div>
+      </div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-icon">⇆</div>
+      <div class="kpi-data">
+        <div class="kpi-label">总带宽利用率</div>
+        <div class="kpi-value"><span id="kpiBandwidth">68.4</span><span class="kpi-unit">%</span></div>
+        <div class="kpi-trend">峰值 89.2%</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== MAIN ========== -->
+  <section class="main">
+
+    <!-- 左列 -->
+    <div class="col">
+      <div class="panel">
+        <span class="corner-tr"></span><span class="corner-bl"></span>
+        <div class="panel-header">
+          <div class="panel-title">算力资源分布</div>
+          <div class="panel-tag">REAL-TIME</div>
+        </div>
+        <div class="panel-body">
+          <div id="chartResource" class="chart"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <span class="corner-tr"></span><span class="corner-bl"></span>
+        <div class="panel-header">
+          <div class="panel-title">算力中心负载 TOP6</div>
+          <div class="panel-tag">TOP</div>
+        </div>
+        <div class="panel-body">
+          <div id="computeList" class="compute-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 中央地图 -->
+    <div class="panel map-panel">
+      <span class="corner-tr"></span><span class="corner-bl"></span>
+      <div class="map-stats">
+        <div class="map-stat">
+          <div class="v"><span id="msTotal">36</span><small>座</small></div>
+          <div class="l">算力枢纽</div>
+        </div>
+        <div class="map-stat">
+          <div class="v"><span id="msEdge">4128</span><small>个</small></div>
+          <div class="l">边缘节点</div>
+        </div>
+        <div class="map-stat">
+          <div class="v"><span id="msTask">2.86</span><small>M/s</small></div>
+          <div class="l">任务调度</div>
+        </div>
+        <div class="map-stat">
+          <div class="v"><span id="msHealth">98.6</span><small>%</small></div>
+          <div class="l">健康度</div>
+        </div>
+      </div>
+
+      <div class="panel-body map-stage" id="mapStage">
+        <div id="chartMap" class="chart"></div>
+      </div>
+
+      <div class="map-legend">
+        <div class="legend-item"><span class="legend-dot normal"></span>正常 (≤60%)</div>
+        <div class="legend-item"><span class="legend-dot busy"></span>繁忙 (60-85%)</div>
+        <div class="legend-item"><span class="legend-dot warn"></span>告警 (≥85%)</div>
+        <div class="legend-item"><span class="legend-dot alert"></span>故障</div>
+      </div>
+    </div>
+
+    <!-- 右列 -->
+    <div class="col">
+      <div class="panel">
+        <span class="corner-tr"></span><span class="corner-bl"></span>
+        <div class="panel-header">
+          <div class="panel-title">网络流量实时监测</div>
+          <div class="panel-tag">Mbps</div>
+        </div>
+        <div class="panel-body">
+          <div id="chartTraffic" class="chart"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <span class="corner-tr"></span><span class="corner-bl"></span>
+        <div class="panel-header">
+          <div class="panel-title">网络 QoS 评分</div>
+          <div class="panel-tag">A+</div>
+        </div>
+        <div class="panel-body">
+          <div id="chartQos" class="chart"></div>
+        </div>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- ========== FOOTER ========== -->
+  <footer class="footer">
+    <div class="alert-bar">
+      <div class="alert-label"><span class="status-dot"></span>实时告警</div>
+      <div class="alert-marquee">
+        <span id="alertText">
+          <i>[14:31:42]</i> 上海-华东节点 #SH-EDGE-027 GPU 集群使用率达 92.4% <i>·</i>
+          <i>[14:30:18]</i> 北京-华北骨干链路 BJ→TJ 延迟抖动超过阈值 <i>·</i>
+          <i>[14:28:55]</i> 广东-华南调度中心 GZ-04 任务队列堆积 <i>·</i>
+          <i>[14:27:12]</i> 完成全国算力调度演练 #2026Q4-A <i>·</i>
+          <i>[14:25:30]</i> 成都-西南节点 CD-EDGE-103 恢复在线
+        </span>
+      </div>
+    </div>
+    <div class="node-list">
+      <span class="label">节点状态</span>
+      <span class="node-pill up"><span class="dot"></span>BJ-NORTH-01 正常</span>
+      <span class="node-pill up"><span class="dot"></span>SH-EAST-02 正常</span>
+      <span class="node-pill warn"><span class="dot"></span>GZ-SOUTH-04 繁忙</span>
+      <span class="node-pill up"><span class="dot"></span>CD-WEST-01 正常</span>
+      <span class="node-pill warn"><span class="dot"></span>XA-NW-02 繁忙</span>
+      <span class="node-pill up"><span class="dot"></span>HZ-EAST-03 正常</span>
+      <span class="node-pill down"><span class="dot"></span>HK-SOUTH-99 告警</span>
+    </div>
+  </footer>
+
+</div>
+
+<div class="scale-tip">建议 1920×1080 浏览器全屏查看</div>
+
+<script>
+/* ===================== 工具 ===================== */
+const $ = sel => document.querySelector(sel);
+const rand = (min, max) => Math.random() * (max - min) + min;
+const randInt = (min, max) => Math.floor(rand(min, max + 1));
+
+/* ===================== 粒子背景 ===================== */
+(function () {
+  const wrap = document.getElementById('particles');
+  for (let i = 0; i < 30; i++) {
+    const p = document.createElement('div');
+    p.className = 'particle';
+    p.style.left = rand(0, 100) + '%';
+    p.style.animationDelay = rand(0, 8) + 's';
+    p.style.animationDuration = rand(6, 12) + 's';
+    p.style.opacity = rand(0.3, 0.9);
+    wrap.appendChild(p);
+  }
+})();
+
+/* ===================== 时间 ===================== */
+(function () {
+  const week = ['星期日','星期一','星期二','星期三','星期四','星期五','星期六'];
+  function tick() {
+    const d = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    $('#dateText').textContent = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+    $('#weekText').textContent = week[d.getDay()];
+    $('#timeText').textContent = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+  tick();
+  setInterval(tick, 1000);
+})();
+
+/* ============================================================
+ * ECharts 地图: 中国剪影 (DataV GeoJSON 简化 Douglas-Peucker, ~22KB)
+ * 包含 geo + lines + scatter + effectScatter
+ * ============================================================ */
+const CHINA_GEO = {"type":"FeatureCollection","features":[{"type":"Feature","properties":{"name":"中华人民共和国"},"geometry":{"type":"MultiPolygon","coordinates":[[[[124.515065,40.22019],[126.041362,40.928851],[126.694874,41.751103],[128.114614,41.364186],[128.317874,41.575844],[128.033926,42.000199],[128.952908,42.025545],[129.344029,42.451777],[129.704354,42.427045],[129.897143,43.001748],[130.645509,42.426603],[130.40714,42.731548],[131.145652,42.9365],[131.314419,43.392653],[130.965181,44.85065],[131.887858,45.342393],[133.139447,45.127459],[133.143759,45.430658],[133.909987,46.254447],[134.177305,47.326299],[134.779694,47.7159],[134.55426,47.982173],[134.679295,48.256245],[135.09567,48.437618],[133.130208,48.134971],[132.558,47.718316],[131.029855,47.694555],[130.666451,48.105007],[130.845073,48.296473],[130.538335,48.612016],[130.680617,48.881146],[130.237757,48.868551],[129.51834,49.423652],[127.815268,49.593859],[127.531936,49.826059],[127.603385,50.239309],[126.922772,51.061937],[126.556288,52.136203],[125.613901,53.083564],[123.517243,53.558292],[120.882871,53.294411],[120.031642,52.773674],[120.07599,52.586092],[120.734429,52.536977],[120.786784,52.15787],[120.087077,51.678013],[119.125596,50.389118],[119.350414,50.166145],[117.809333,49.521263],[116.717889,49.847288],[115.822929,48.259432],[115.529126,48.155336],[115.939342,47.683275],[116.791186,47.89758],[117.384335,47.641356],[117.813645,48.016212],[118.568171,47.992187],[119.716282,47.195518],[119.911534,46.669572],[117.42006,46.582029],[117.372017,46.36028],[116.585462,46.292504],[116.17463,45.688775],[114.551014,45.387383],[113.631417,44.745333],[112.002874,45.090713],[111.415883,44.35724],[111.951135,43.693275],[111.02045,43.329998],[110.437156,42.781203],[109.291509,42.435879],[107.46648,42.458842],[105.009498,41.583007],[104.524138,41.661745],[104.530298,41.875104],[103.418527,41.882233],[100.862995,42.671295],[96.386348,42.727592],[95.326932,44.028554],[95.41378,44.298589],[94.722696,44.34055],[93.509296,44.968055],[90.881698,45.192025],[90.676591,45.582488],[91.028292,46.023054],[91.054161,46.717598],[90.384635,47.644179],[89.569132,48.037825],[89.078228,47.98698],[87.973233,48.575997],[87.821096,49.173883],[86.887948,49.132001],[86.579978,48.538763],[85.587084,48.191654],[85.545816,47.057891],[84.95513,46.861013],[83.02724,47.21544],[82.266555,45.620172],[82.562822,45.204676],[81.78797,45.3836],[79.887798,44.90917],[80.400259,44.628751],[80.804315,43.178314],[80.378701,43.031502],[80.602903,42.894424],[80.262289,42.828623],[80.14218,42.03488],[78.163783,41.383497],[77.780669,41.022832],[76.885709,41.027347],[76.333212,40.343459],[75.709265,40.280939],[75.599628,40.659727],[74.844486,40.521117],[74.908544,40.338897],[74.023439,40.085251],[73.868223,39.482794],[73.502355,39.383877],[73.839889,39.008199],[73.799237,38.610878],[74.862965,38.484035],[74.891914,37.668097],[75.140137,37.355258],[74.498944,37.072155],[75.871257,36.666636],[76.160133,35.82442],[76.55803,35.923347],[77.195527,35.519103],[78.140378,35.494745],[78.01719,35.228267],[78.280812,34.623269],[79.039649,34.33467],[78.661462,34.086718],[78.684868,33.654415],[79.152366,33.184375],[79.308199,32.596918],[78.970664,32.331826],[78.741534,32.703743],[78.395377,32.530339],[78.469905,32.127808],[78.762476,31.947203],[78.755085,31.355742],[79.096931,30.992192],[79.668523,30.980392],[81.131995,30.016124],[81.418407,30.420525],[82.104563,30.346182],[82.17786,30.06793],[83.266841,29.571035],[83.596368,29.174153],[84.116837,29.286438],[84.483321,28.735331],[85.126361,28.676016],[85.113427,28.344708],[85.720743,28.372093],[86.002227,27.90717],[86.19132,28.167058],[86.414906,27.904526],[86.700086,28.101617],[87.227946,27.812991],[88.764099,28.068353],[88.984605,27.208957],[89.238988,27.796581],[89.789638,28.240895],[91.025828,27.857445],[91.464993,28.002852],[91.585101,27.540578],[92.064918,27.391365],[92.109265,26.854991],[93.56781,26.938252],[94.277372,27.58143],[95.740228,28.275159],[96.275479,28.228241],[97.097758,27.740979],[97.68598,28.519958],[98.139311,28.142259],[98.317318,27.51935],[98.706591,27.553313],[98.781736,26.620893],[98.575396,26.118485],[98.705976,25.855426],[98.170724,25.620383],[97.547394,24.739221],[97.767284,24.258357],[97.5283,23.926736],[98.876591,24.15137],[98.669019,23.800857],[98.889525,23.209249],[99.563363,22.925684],[99.31514,22.737598],[99.219669,22.110816],[99.972347,22.053141],[100.235353,21.466756],[101.123537,21.771642],[101.222088,21.234324],[101.76473,21.147835],[101.672339,22.47517],[102.270416,22.419858],[102.510633,22.774574],[103.030485,22.441432],[103.323057,22.807678],[103.964865,22.502265],[104.117618,22.808781],[104.737869,22.825882],[104.804391,23.110207],[105.325475,23.390086],[105.879205,22.916865],[106.838838,22.803265],[106.560434,22.455813],[106.698404,21.959925],[107.363619,21.602031],[108.230245,21.491259],[108.626294,21.67991],[109.138756,21.567528],[109.138756,21.388762],[109.894513,21.442248],[109.655529,20.929435],[109.929006,20.211691],[110.54125,20.42047],[110.208642,21.050684],[112.136532,21.793871],[112.929862,21.838875],[113.086927,22.12634],[113.266781,21.871646],[113.567359,22.075327],[113.678228,22.726007],[113.893807,22.442539],[114.381631,22.60175],[114.506667,22.438667],[114.709927,22.787817],[114.88547,22.538751],[115.190359,22.818711],[115.575322,22.650914],[115.654162,22.865591],[116.50539,22.930645],[116.888504,23.501543],[117.463791,23.584937],[117.910347,24.012045],[118.121615,24.570067],[118.614366,24.521617],[118.647627,24.843536],[118.988857,24.878831],[118.91556,25.256668],[119.119436,25.012861],[119.380595,25.250173],[119.219834,25.468654],[119.866571,25.455145],[119.785883,25.66786],[119.675014,25.475137],[119.478529,25.631715],[119.723673,26.011503],[119.604181,26.168985],[119.95465,26.352534],[119.577695,26.622498],[119.942947,26.784492],[119.828383,26.524013],[120.1382,26.638012],[120.054432,26.863533],[120.545952,27.156785],[120.709176,27.682699],[121.192072,27.822518],[121.059029,28.096338],[121.627541,28.251966],[121.540694,28.655537],[121.774751,28.863818],[121.608447,29.168927],[121.988482,29.110906],[121.833265,29.653242],[122.140003,29.901535],[121.058413,30.563888],[121.681128,30.818633],[122.133227,30.595317],[121.946598,31.066039],[121.343593,31.511996],[121.981706,31.464024],[121.856055,31.955328],[120.961711,32.612042],[120.311895,34.306991],[119.211211,34.981507],[120.30512,35.971796],[120.181316,36.203936],[120.712255,36.126632],[120.694393,36.390118],[120.965407,36.466199],[120.847146,36.618617],[122.532356,36.901496],[122.714058,37.392355],[121.571491,37.441313],[120.733197,37.833714],[120.227511,37.693673],[119.740303,37.133727],[119.327624,37.115595],[119.001176,37.31862],[118.988857,37.620709],[119.275269,37.739594],[118.974075,38.094162],[118.018753,38.202409],[117.644878,38.52759],[117.64611,38.828933],[118.032919,39.219939],[118.491178,38.909077],[118.578642,39.130863],[118.926031,39.123435],[119.540739,39.888079],[120.491749,40.20008],[121.126167,40.86914],[121.816019,40.894931],[122.265038,40.48016],[121.226565,39.554814],[121.270296,39.374162],[121.72486,39.364447],[121.631853,39.077921],[121.08921,38.922115],[121.13787,38.723023],[123.274563,39.753862],[124.151045,39.74558],[124.515065,40.22019]]],[[[114.031778,22.503923],[113.84946,22.191188],[114.394566,22.361757],[114.031778,22.503923]]],[[[122.63953,39.286209],[122.63953,39.286209]]],[[[122.318625,39.170775],[122.318625,39.170775]]],[[[122.691884,39.23292],[122.691884,39.23292]]],[[[122.738696,39.034701],[122.738696,39.034701]]],[[[110.106396,20.026812],[109.300748,19.917693],[108.644772,19.349518],[108.644772,18.486738],[109.584696,18.143579],[110.499366,18.651824],[111.043856,19.763448],[110.687843,20.163947],[110.106396,20.026812]]],[[[120.443706,22.441432],[120.873016,21.897191],[122.012503,25.001471],[121.62323,25.29455],[121.024537,25.040517],[120.102476,23.701162],[120.018708,23.073322],[120.443706,22.441432]]],[[[117.024627,23.437865],[117.024627,23.437865]]],[[[122.163408,29.988137],[122.343879,30.020269],[121.934895,30.161631],[122.163408,29.988137]]],[[[118.412338,24.514538],[118.282375,24.413218],[118.412338,24.514538]]],[[[122.213915,30.186464],[122.213915,30.186464]]],[[[122.229314,29.711995],[122.229314,29.711995]]],[[[122.427646,30.738422],[122.427646,30.738422]]],[[[124.542782,25.903886],[124.542782,25.903886]]],[[[122.162793,30.329654],[122.162793,30.329654]]],[[[112.853486,21.740515],[112.775261,21.564189],[112.853486,21.740515]]],[[[122.317393,30.249556],[122.317393,30.249556]]],[[[112.530733,21.583667],[112.663776,21.714386],[112.530733,21.583667]]],[[[122.026054,29.178333],[122.026054,29.178333]]],[[[112.208597,3.876129],[112.208597,3.876129]]],[[[123.445178,25.726102],[123.445178,25.726102]]],[[[122.372212,29.893234],[122.372212,29.893234]]],[[[119.646064,23.550928],[119.646064,23.550928]]],[[[123.666916,25.914114],[123.666916,25.914114]]],[[[119.471138,25.197116],[119.471138,25.197116]]],[[[122.43011,30.408655],[122.277973,30.471603],[122.43011,30.408655]]],[[[114.142647,22.213906],[114.142647,22.213906]]],[[[123.022644,39.546507],[123.022644,39.546507]]],[[[121.837577,28.770484],[121.837577,28.770484]]],[[[114.305871,22.372273],[114.305871,22.372273]]],[[[119.580159,25.627398],[119.580159,25.627398]]],[[[120.729502,37.947065],[120.729502,37.947065]]],[[[122.265038,29.84549],[122.265038,29.84549]]],[[[119.506246,23.625518],[119.506246,23.625518]]],[[[119.976824,26.191005],[119.976824,26.191005]]],[[[114.231342,22.016528],[114.231342,22.016528]]],[[[121.201311,27.623328],[121.201311,27.623328]]],[[[121.790765,29.082144],[121.790765,29.082144]]],[[[110.43346,21.171276],[110.632409,21.210893],[110.43346,21.171276]]],[[[112.435263,21.663781],[112.435263,21.663781]]],[[[120.692545,37.983867],[120.692545,37.983867]]],[[[110.517844,21.079166],[110.201251,20.938378],[110.535706,20.922727],[110.517844,21.079166]]],[[[122.503407,39.241263],[122.503407,39.241263]]],[[[118.230636,24.401228],[118.230636,24.401228]]],[[[121.889315,28.471569],[121.889315,28.471569]]],[[[122.182503,29.650642],[122.083952,29.78318],[122.182503,29.650642]]],[[[113.554425,22.107489],[113.554425,22.107489]]],[[[119.906607,26.68989],[119.906607,26.68989]]],[[[121.795693,31.330186],[121.509897,31.4824],[121.795693,31.330186]]],[[[122.461523,29.944068],[122.461523,29.944068]]],[[[118.204151,24.504737],[118.204151,24.504737]]],[[[122.570544,30.644244],[122.570544,30.644244]]],[[[120.786784,40.473787],[120.786784,40.473787]]],[[[119.642985,26.129231],[119.642985,26.129231]]],[[[119.929397,26.134067],[119.929397,26.134067]]],[[[121.869605,28.423685],[121.869605,28.423685]]],[[[119.497623,23.38679],[119.497623,23.38679]]],[[[123.086702,39.426881],[123.086702,39.426881]]],[[[113.765076,21.962145],[113.765076,21.962145]]],[[[121.850511,29.977251],[121.850511,29.977251]]],[[[113.266165,8.125929],[113.386273,8.289412],[113.266165,8.125929]]],[[[122.065474,30.179739],[122.065474,30.179739]]],[[[122.391306,29.970512],[122.391306,29.970512]]],[[[119.557369,23.666634],[119.557369,23.666634]]],[[[113.723192,21.922177],[113.723192,21.922177]]],[[[121.066421,27.478475],[121.066421,27.478475]]],[[[121.952141,29.187738],[121.952141,29.187738]]],[[[113.142977,21.831653],[113.142977,21.831653]]],[[[120.034106,26.488667],[120.034106,26.488667]]],[[[122.038373,29.759284],[122.038373,29.759284]]],[[[119.662079,25.646822],[119.662079,25.646822]]],[[[121.957685,30.287804],[121.957685,30.287804]]],[[[121.940438,30.114533],[121.940438,30.114533]]],[[[111.99733,3.848065],[111.99733,3.848065]]],[[[121.801852,31.356765],[122.122756,31.307179],[121.801852,31.356765]]],[[[111.463311,17.077491],[111.463311,17.077491]]],[[[113.819894,22.396068],[113.819894,22.396068]]],[[[122.192974,29.965327],[122.192974,29.965327]]],[[[114.190074,21.986564],[114.190074,21.986564]]],[[[117.708319,15.182712],[117.708319,15.182712]]],[[[122.066706,25.6247],[122.066706,25.6247]]],[[[120.150519,26.798916],[120.150519,26.798916]]],[[[120.990044,36.413239],[120.990044,36.413239]]],[[[114.153734,21.97491],[114.153734,21.97491]]],[[[119.760629,26.613402],[119.760629,26.613402]]],[[[122.760254,30.141966],[122.760254,30.141966]]],[[[121.468013,22.67687],[121.468013,22.67687]]],[[[122.287828,29.723949],[122.287828,29.723949]]],[[[121.510513,22.086972],[121.510513,22.086972]]],[[[123.160614,39.025404],[123.160614,39.025404]]],[[[112.241858,3.942404],[112.241858,3.942404]]],[[[116.769628,20.771721],[116.862635,20.588633],[116.769628,20.771721]]],[[[121.134174,27.787051],[121.134174,27.787051]]],[[[111.734324,16.19732],[111.734324,16.19732]]],[[[113.025333,21.847762],[113.025333,21.847762]]],[[[122.097503,25.499987],[122.097503,25.499987]]],[[[122.454132,29.956513],[122.454132,29.956513]]],[[[111.649324,16.255931],[111.649324,16.255931]]],[[[113.896887,7.607204],[114.368696,7.638642],[114.540543,7.945783],[113.896887,7.607204]]],[[[122.282901,29.860542],[122.282901,29.860542]]],[[[122.264423,30.269716],[122.264423,30.269716]]],[[[113.976959,8.872888],[113.976959,8.872888]]],[[[120.135736,26.550784],[120.135736,26.550784]]],[[[122.781196,30.694175],[122.781196,30.694175]]],[[[113.956017,8.840365],[113.956017,8.840365]]],[[[121.098449,27.937311],[121.098449,27.937311]]],[[[109.088249,21.014934],[109.088249,21.014934]]],[[[110.405127,20.678245],[110.405127,20.678245]]],[[[111.97454,16.323715],[111.97454,16.323715]]],[[[111.739251,16.452898],[111.739251,16.452898]]],[[[120.750444,38.150188],[120.750444,38.150188]]],[[[112.216604,8.866383],[112.216604,8.866383]]],[[[113.792177,7.373422],[113.792177,7.373422]]],[[[120.159142,35.765198],[120.159142,35.765198]]],[[[120.918595,38.345236],[120.918595,38.345236]]],[[[114.194386,8.764664],[114.194386,8.764664]]],[[[112.232619,16.996239],[112.232619,16.996239]]],[[[121.185913,27.963215],[121.185913,27.963215]]],[[[123.716807,39.74512],[123.716807,39.74512]]],[[[119.421247,23.216949],[119.421247,23.216949]]],[[[114.689601,10.345648],[114.689601,10.345648]]],[[[115.837712,9.709775],[115.837712,9.709775]]],[[[114.617536,9.965688],[114.617536,9.965688]]],[[[113.769387,7.636862],[113.769387,7.636862]]],[[[109.463972,7.344339],[109.948716,7.522962],[109.463972,7.344339]]],[[[120.62664,37.94565],[120.62664,37.94565]]],[[[120.360554,26.916909],[120.360554,26.916909]]],[[[122.836014,30.698806],[122.836014,30.698806]]],[[[116.273181,8.879392],[116.273181,8.879392]]],[[[112.476531,16.001247],[112.476531,16.001247]]],[[[110.644727,20.935584],[110.644727,20.935584]]],[[[112.537509,8.846278],[112.537509,8.846278]]],[[[120.802183,38.284193],[120.802183,38.284193]]],[[[114.469095,10.836261],[114.469095,10.836261]]],[[[121.489571,37.577086],[121.489571,37.577086]]],[[[119.668238,26.628383],[119.668238,26.628383]]],[[[122.200365,29.969475],[122.200365,29.969475]]],[[[112.409393,16.294996],[112.409393,16.294996]]],[[[121.487723,37.578509],[121.487723,37.578509]]],[[[121.485875,37.578509],[121.485875,37.578509]]],[[[122.471378,29.927472],[122.471378,29.927472]]],[[[121.626925,31.445135],[121.626925,31.445135]]],[[[114.320037,22.381127],[114.320037,22.381127]]],[[[110.556648,20.32734],[110.556648,20.32734]]],[[[116.48876,10.395686],[116.644592,10.335051],[116.48876,10.395686]]],[[[111.500267,16.45175],[111.500267,16.45175]]],[[[121.943518,31.215608],[121.943518,31.215608]]],[[[112.349031,16.912088],[112.349031,16.912088]]],[[[122.029134,29.954957],[122.029134,29.954957]]],[[[115.500177,9.897897],[115.500177,9.897897]]],[[[121.044247,27.979072],[121.044247,27.979072]]],[[[118.869365,39.142932],[118.869365,39.142932]]],[[[114.669891,8.210048],[114.669891,8.210048]]],[[[114.507899,8.120004],[114.507899,8.120004]]],[[[113.895039,8.00505],[113.895039,8.00505]]],[[[115.16757,8.386523],[115.315395,8.356326],[115.16757,8.386523]]],[[[115.436119,9.393447],[115.436119,9.393447]]],[[[120.355011,22.327439],[120.355011,22.327439]]],[[[116.457347,9.174326],[116.457347,9.174326]]],[[[113.638192,8.976942],[113.638192,8.976942]]],[[[114.696992,11.004322],[114.696992,11.004322]]],[[[122.152322,29.97103],[122.152322,29.97103]]],[[[114.62,11.432264],[114.62,11.432264]]],[[[114.910723,10.863298],[114.910723,10.863298]]],[[[111.572948,16.470116],[111.572948,16.470116]]],[[[113.939387,8.875253],[113.939387,8.875253]]],[[[109.936397,7.848566],[110.078063,7.949339],[109.936397,7.848566]]],[[[116.727128,11.501473],[116.727128,11.501473]]],[[[111.690592,16.587731],[111.690592,16.587731]]],[[[121.88254,31.240684],[121.88254,31.240684]]],[[[112.507328,16.466098],[112.507328,16.466098]]],[[[111.761425,16.061642],[111.761425,16.061642]]],[[[113.845764,10.018733],[113.845764,10.018733]]],[[[114.791847,8.160882],[114.791847,8.160882]]],[[[116.557129,9.745167],[116.557129,9.745167]]],[[[115.28275,10.191951],[115.28275,10.191951]]],[[[116.832454,10.476908],[116.832454,10.476908]]],[[[114.703151,16.170307],[114.703151,16.170307]]],[[[115.97753,9.321997],[115.97753,9.321997]]],[[[113.660366,9.231039],[113.660366,9.231039]]],[[[114.665579,7.590001],[114.665579,7.590001]]],[[[117.770529,10.773361],[117.770529,10.773361]]],[[[114.493116,10.717504],[114.493116,10.717504]]],[[[114.688985,11.469217],[114.688985,11.469217]]],[[[114.242429,10.242014],[114.242429,10.242014]]],[[[116.638433,10.503977],[116.638433,10.503977]]],[[[110.459946,8.116449],[110.459946,8.116449]]],[[[111.463311,8.52504],[111.463311,8.52504]]],[[[115.258113,8.509652],[115.258113,8.509652]]],[[[113.221817,8.073789],[113.221817,8.073789]]],[[[114.305871,22.369506],[114.305871,22.369506]]],[[[114.074893,10.929118],[114.074893,10.929118]]],[[[117.258068,10.320331],[117.258068,10.320331]]],[[[115.943037,21.097592],[115.943037,21.097592]]],[[[114.212864,16.040937],[114.212864,16.040937]]],[[[110.609003,8.010976],[110.609003,8.010976]]],[[[115.509416,8.490712],[115.509416,8.490712]]],[[[111.539071,7.54432],[111.539071,7.54432]]],[[[111.657947,8.672974],[111.657947,8.672974]]],[[[110.460561,7.799948],[110.460561,7.799948]]],[[[112.345952,8.926101],[112.345952,8.926101]]],[[[111.925265,8.070827],[111.925265,8.070827]]],[[[116.469665,9.810041],[116.469665,9.810041]]],[[[115.926407,20.981411],[115.926407,20.981411]]],[[[114.985252,11.078332],[114.985252,11.078332]]],[[[114.457392,15.599305],[114.457392,15.599305]]],[[[116.045283,10.095338],[116.045283,10.095338]]],[[[114.10569,16.004124],[114.10569,16.004124]]],[[[117.266691,10.69163],[117.418212,10.702803],[117.266691,10.69163]]],[[[114.854057,7.244611],[114.854057,7.244611]]],[[[112.207981,8.835634],[112.207981,8.835634]]],[[[111.670266,7.651098],[111.670266,7.651098]]],[[[112.823305,8.910729],[112.823305,8.910729]]],[[[112.527654,5.79444],[112.527654,5.79444]]],[[[114.599058,8.846278],[114.599058,8.846278]]],[[[114.868223,7.983715],[114.868223,7.983715]]],[[[112.945261,8.410204],[112.945261,8.410204]]],[[[113.600004,6.961929],[113.600004,6.961929]]],[[[117.347995,10.090624],[117.347995,10.090624]]],[[[116.695099,16.345538],[116.695099,16.345538]]],[[[115.834632,22.722695],[115.834632,22.722695]]],[[[114.315726,22.299203],[114.315726,22.299203]]],[[[112.993304,19.472003],[112.993304,19.472003]]],[[[114.448153,16.034035],[114.448153,16.034035]]],[[[113.832213,19.158552],[113.832213,19.158552]]],[[[112.650842,5.106941],[112.650842,5.106941]]],[[[111.638853,7.907254],[111.638853,7.907254]]],[[[112.244322,8.874662],[112.244322,8.874662]]],[[[112.89229,7.844416],[112.89229,7.844416]]],[[[112.583088,5.56159],[112.583088,5.56159]]],[[[112.523342,5.656289],[112.523342,5.656289]]],[[[113.596924,10.240836],[113.596924,10.240836]]],[[[115.361591,13.948985],[115.361591,13.948985]]],[[[113.860546,15.477068],[113.860546,15.477068]]],[[[114.319421,22.382234],[114.319421,22.382234]]],[[[115.834632,22.723247],[115.834632,22.723247]]],[[[112.907072,4.993079],[112.907072,4.993079]]],[[[112.557219,5.109326],[112.557219,5.109326]]],[[[112.350263,5.621747],[112.350263,5.621747]]],[[[112.226459,16.759147],[112.226459,16.759147]]],[[[112.233851,15.69612],[112.233851,15.69612]]],[[[114.372392,22.32301],[114.372392,22.32301]]],[[[112.472219,5.73966],[112.472219,5.73966]]],[[[112.612037,5.367973],[112.612037,5.367973]]],[[[113.217506,6.306249],[113.217506,6.306249]]],[[[116.152457,9.579384],[116.152457,9.579384]]],[[[114.948911,7.508722],[114.948911,7.508722]]],[[[111.553854,7.807656],[111.553854,7.807656]]],[[[113.938771,15.8355],[113.938771,15.8355]]],[[[114.926122,16.036911],[114.926122,16.036911]]],[[[114.323733,22.297541],[114.323733,22.297541]]],[[[116.749302,9.056736],[116.749302,9.056736]]],[[[112.64653,16.385733],[112.64653,16.385733]]],[[[115.758256,10.461018],[115.758256,10.461018]]],[[[111.203384,19.92557],[111.203384,19.92557]]],[[[117.21372,10.735144],[117.21372,10.735144]]],[[[115.782277,10.541046],[115.782277,10.541046]]],[[[112.671784,16.331755],[112.671784,16.331755]]],[[[113.586453,22.201162],[113.586453,22.201162]]],[[[112.512255,9.544566],[112.512255,9.544566]]],[[[114.610145,15.649447],[114.610145,15.649447]]],[[[117.299336,11.077745],[117.299336,11.077745]]],[[[117.691073,11.048965],[117.691073,11.048965]]],[[[114.166668,9.38459],[114.166668,9.38459]]],[[[114.714854,9.736909],[114.714854,9.736909]]],[[[112.554139,5.97839],[112.554139,5.97839]]],[[[122.51865306,23.46078502],[122.79135575,24.58581125],[122.51865306,23.46078502]]],[[[121.17202617,20.8054593],[121.9081301,21.70151955],[121.17202617,20.8054593]]],[[[119.47366172,18.00707291],[120.02167941,19.03759723],[119.47366172,18.00707291]]],[[[119.0726757,15.04098494],[119.0626757,16.05388528],[119.0726757,15.04098494]]],[[[118.68646749,11.18959191],[118.5287348,10.90178762],[118.98227119,11.99819697],[118.68646749,11.18959191]]],[[[115.54466883,7.14672265],[116.24932463,7.99337338],[115.54466883,7.14672265]]],[[[112.30705249,3.53487257],[111.77936129,3.40490807],[112.85690272,3.74585715],[112.30705249,3.53487257]]],[[[108.26055972,6.08912451],[108.23327786,7.08584944],[108.26055972,6.08912451]]],[[[110.12822847,11.36894451],[110.32517479,12.24975358],[110.12822847,11.36894451]]],[[[109.82951587,15.22896754],[109.29757451,16.21047978],[109.82951587,15.22896754]]]]}}]};
+
+// 算力节点 — 经度/纬度
+const NODES = [
+  { name: '北京',   value: [116.4074, 39.9042],  type: 'hub',  status: 'normal' },
+  { name: '上海',   value: [121.4737, 31.2304],  type: 'hub',  status: 'normal' },
+  { name: '广州',   value: [113.2644, 23.1291],  type: 'hub',  status: 'warn'   },
+  { name: '深圳',   value: [114.0579, 22.5431],  type: 'hub',  status: 'normal' },
+  { name: '成都',   value: [104.0668, 30.5728],  type: 'hub',  status: 'normal' },
+  { name: '武汉',   value: [114.3055, 30.5928],  type: 'hub',  status: 'normal' },
+  { name: '西安',   value: [108.9541, 34.2498],  type: 'edge', status: 'warn'   },
+  { name: '杭州',   value: [120.1551, 30.2741],  type: 'edge', status: 'normal' },
+  { name: '南京',   value: [118.7969, 32.0603],  type: 'edge', status: 'normal' },
+  { name: '重庆',   value: [106.5516, 29.5630],  type: 'edge', status: 'normal' },
+  { name: '天津',   value: [117.1901, 39.1255],  type: 'edge', status: 'normal' },
+  { name: '哈尔滨', value: [126.5349, 45.8023],  type: 'edge', status: 'normal' },
+  { name: '沈阳',   value: [123.4315, 41.8057],  type: 'edge', status: 'normal' },
+  { name: '乌鲁木齐', value: [87.6168, 43.8256], type: 'edge', status: 'normal' },
+  { name: '拉萨',   value: [91.1322, 29.6603],   type: 'edge', status: 'normal' },
+  { name: '昆明',   value: [102.8329, 24.8801],  type: 'edge', status: 'normal' },
+  { name: '兰州',   value: [103.8343, 36.0611],  type: 'edge', status: 'normal' },
+  { name: '呼和浩特', value: [111.7519, 40.8414], type: 'edge', status: 'normal' },
+  { name: '郑州',   value: [113.6253, 34.7461],  type: 'edge', status: 'normal' },
+  { name: '济南',   value: [117.1201, 36.6512],  type: 'edge', status: 'normal' },
+  { name: '长沙',   value: [112.9388, 28.2278],  type: 'edge', status: 'normal' },
+  { name: '福州',   value: [119.2965, 26.0745],  type: 'edge', status: 'normal' },
+  { name: '海口',   value: [110.3312, 20.0311],  type: 'edge', status: 'normal' },
+  { name: '香港',   value: [114.1694, 22.3193],  type: 'edge', status: 'alert'  },
+  { name: '台北',   value: [121.5654, 25.0330],  type: 'edge', status: 'normal' }
+];
+
+// 节点连线 (基于城市名)
+const LINKS = [
+  ['北京','上海'], ['北京','广州'], ['北京','武汉'], ['北京','西安'],
+  ['北京','沈阳'], ['北京','呼和浩特'], ['上海','杭州'], ['上海','南京'],
+  ['上海','福州'], ['广州','深圳'], ['广州','长沙'], ['广州','昆明'],
+  ['广州','香港'], ['西安','兰州'], ['西安','成都'], ['成都','重庆'],
+  ['成都','拉萨'], ['武汉','长沙'], ['武汉','郑州'], ['郑州','济南'],
+  ['济南','天津'], ['天津','沈阳'], ['乌鲁木齐','兰州'], ['兰州','呼和浩特']
+];
+
+const STATUS_COLOR = {
+  normal: '#00ff9d',
+  busy:   '#00e5ff',
+  warn:   '#ffb347',
+  alert:  '#ff5577'
+};
+
+echarts.registerMap('china', CHINA_GEO);
+
+const mapChart = echarts.init(document.getElementById('chartMap'));
+
+function buildMapOption() {
+  const hubs  = NODES.filter(n => n.type === 'hub');
+  const edges = NODES.filter(n => n.type === 'edge');
+
+  const lookup = Object.fromEntries(NODES.map(n => [n.name, n]));
+  const lineData = LINKS
+    .map(([a, b]) => {
+      const A = lookup[a], B = lookup[b];
+      return A && B ? { coords: [A.value, B.value] } : null;
+    })
+    .filter(Boolean);
+
+  return {
+    backgroundColor: 'transparent',
+    tooltip: {
+      trigger: 'item',
+      backgroundColor: 'rgba(0, 30, 60, 0.85)',
+      borderColor: '#00e5ff',
+      borderWidth: 1,
+      textStyle: { color: '#fff', fontSize: 12 },
+      formatter: p => {
+        if (!p.name) return '';
+        const tag = p.seriesType === 'effectScatter' ? '★ 算力枢纽'
+                  : p.seriesType === 'scatter'     ? '◆ 边缘节点'
+                  : p.seriesType === 'lines'       ? '⇢ 骨干链路'
+                  : '';
+        return tag ? tag + ' · ' + p.name : p.name;
+      }
+    },
+    geo: {
+      map: 'china',
+      roam: false,
+      zoom: 1.15,
+      layoutCenter: ['50%', '50%'],
+      layoutSize: '92%',
+      label: { show: false },
+      itemStyle: {
+        areaColor: 'rgba(0, 60, 120, 0.35)',
+        borderColor: '#00e5ff',
+        borderWidth: 1,
+        shadowColor: 'rgba(0, 229, 255, 0.55)',
+        shadowBlur: 14
+      },
+      emphasis: {
+        disabled: true
+      }
+    },
+    series: [
+      // 骨干飞线 (流动效果)
+      {
+        name: '骨干网络',
+        type: 'lines',
+        coordinateSystem: 'geo',
+        zlevel: 2,
+        silent: true,
+        polyline: false,
+        lineStyle: {
+          color: '#00e5ff',
+          width: 1,
+          opacity: 0.55,
+          curveness: 0.25
+        },
+        effect: {
+          show: true,
+          period: 5,
+          trailLength: 0.5,
+          symbol: 'arrow',
+          symbolSize: 5,
+          color: '#ffffff'
+        },
+        data: lineData
+      },
+      // 边缘节点 (静态散点 + 名称)
+      {
+        name: '边缘节点',
+        type: 'scatter',
+        coordinateSystem: 'geo',
+        zlevel: 3,
+        symbolSize: 7,
+        itemStyle: {
+          color: '#00ff9d',
+          shadowBlur: 8,
+          shadowColor: '#00ff9d'
+        },
+        label: {
+          show: true,
+          position: 'right',
+          distance: 4,
+          color: '#a4c8ff',
+          fontSize: 9,
+          formatter: '{b}'
+        },
+        data: edges.map(n => ({
+          name: n.name,
+          value: n.value,
+          itemStyle: { color: STATUS_COLOR[n.status], shadowColor: STATUS_COLOR[n.status] }
+        }))
+      },
+      // 算力枢纽 (脉冲散点 + 名称)
+      {
+        name: '算力枢纽',
+        type: 'effectScatter',
+        coordinateSystem: 'geo',
+        zlevel: 4,
+        symbolSize: 13,
+        showEffectOn: 'render',
+        rippleEffect: { brushType: 'stroke', scale: 4, period: 3 },
+        itemStyle: {
+          color: '#00e5ff',
+          shadowBlur: 12,
+          shadowColor: '#00e5ff'
+        },
+        label: {
+          show: true,
+          position: 'right',
+          distance: 6,
+          color: '#ffffff',
+          fontSize: 11,
+          fontWeight: 700,
+          formatter: '{b}'
+        },
+        data: hubs.map(n => ({
+          name: n.name,
+          value: n.value,
+          itemStyle: { color: STATUS_COLOR[n.status], shadowColor: STATUS_COLOR[n.status] }
+        }))
+      }
+    ]
+  };
+}
+
+mapChart.setOption(buildMapOption());
+
+/* ============================================================
+ * ECharts - 算力资源分布环形图
+ * ============================================================ */
+const resourceChart = echarts.init(document.getElementById('chartResource'));
+resourceChart.setOption({
+  tooltip: { trigger: 'item', textStyle: { color: '#fff' } },
+  legend: {
+    bottom: 0,
+    textStyle: { color: '#a4c8ff', fontSize: 11 },
+    itemWidth: 10,
+    itemHeight: 10
+  },
+  series: [{
+    name: '算力资源',
+    type: 'pie',
+    radius: ['38%', '62%'],
+    center: ['50%', '45%'],
+    avoidLabelOverlap: true,
+    itemStyle: {
+      borderColor: '#061229',
+      borderWidth: 2
+    },
+    label: {
+      color: '#d8ecff',
+      fontSize: 11,
+      formatter: '{b}\n{d}%'
+    },
+    labelLine: { lineStyle: { color: '#3a5a8a' } },
+    data: [
+      { value: 38.6, name: 'CPU', itemStyle: { color: '#00e5ff' } },
+      { value: 24.3, name: 'GPU', itemStyle: { color: '#00ff9d' } },
+      { value: 18.9, name: '内存', itemStyle: { color: '#b388ff' } },
+      { value: 12.4, name: '存储', itemStyle: { color: '#ffb347' } },
+      { value: 5.8, name: '其它', itemStyle: { color: '#ff5577' } }
+    ]
+  }]
+});
+
+/* ============================================================
+ * ECharts - 网络流量
+ * ============================================================ */
+const trafficChart = echarts.init(document.getElementById('chartTraffic'));
+const trafficX = Array.from({ length: 30 }, (_, i) => i);
+const trafficIn = trafficX.map(() => randInt(420, 780));
+const trafficOut = trafficX.map(() => randInt(360, 720));
+
+trafficChart.setOption({
+  tooltip: { trigger: 'axis', textStyle: { color: '#fff' } },
+  legend: {
+    data: ['入向流量', '出向流量'],
+    textStyle: { color: '#a4c8ff', fontSize: 11 },
+    top: 4,
+    itemWidth: 12,
+    itemHeight: 8
+  },
+  grid: { top: 36, left: 36, right: 14, bottom: 24 },
+  xAxis: {
+    type: 'category',
+    data: trafficX,
+    axisLine: { lineStyle: { color: '#1a3a5a' } },
+    axisLabel: { color: '#6e88ad', fontSize: 10 },
+    splitLine: { show: false }
+  },
+  yAxis: {
+    type: 'value',
+    axisLine: { show: false },
+    axisLabel: { color: '#6e88ad', fontSize: 10 },
+    splitLine: { lineStyle: { color: 'rgba(0,229,255,0.08)' } }
+  },
+  series: [
+    {
+      name: '入向流量',
+      type: 'line',
+      smooth: true,
+      symbol: 'none',
+      lineStyle: { width: 2, color: '#00e5ff' },
+      areaStyle: {
+        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+          { offset: 0, color: 'rgba(0,229,255,0.55)' },
+          { offset: 1, color: 'rgba(0,229,255,0.02)' }
+        ])
+      },
+      data: trafficIn
+    },
+    {
+      name: '出向流量',
+      type: 'line',
+      smooth: true,
+      symbol: 'none',
+      lineStyle: { width: 2, color: '#00ff9d' },
+      areaStyle: {
+        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+          { offset: 0, color: 'rgba(0,255,157,0.5)' },
+          { offset: 1, color: 'rgba(0,255,157,0.02)' }
+        ])
+      },
+      data: trafficOut
+    }
+  ]
+});
+
+/* ============================================================
+ * ECharts - QoS 评分雷达
+ * ============================================================ */
+const qosChart = echarts.init(document.getElementById('chartQos'));
+qosChart.setOption({
+  tooltip: {},
+  radar: {
+    center: ['50%', '52%'],
+    radius: '62%',
+    indicator: [
+      { name: '时延', max: 100 },
+      { name: '抖动', max: 100 },
+      { name: '丢包率', max: 100 },
+      { name: '可用性', max: 100 },
+      { name: '带宽', max: 100 },
+      { name: '安全性', max: 100 }
+    ],
+    axisName: { color: '#a4c8ff', fontSize: 11 },
+    splitLine: { lineStyle: { color: 'rgba(0,229,255,0.18)' } },
+    splitArea: { areaStyle: { color: ['rgba(0,229,255,0.02)', 'rgba(0,229,255,0.05)'] } },
+    axisLine: { lineStyle: { color: 'rgba(0,229,255,0.2)' } }
+  },
+  series: [{
+    type: 'radar',
+    symbol: 'circle',
+    symbolSize: 4,
+    lineStyle: { color: '#00e5ff', width: 2 },
+    itemStyle: { color: '#00e5ff' },
+    areaStyle: { color: 'rgba(0,229,255,0.25)' },
+    data: [{ value: [94, 90, 96, 98, 92, 95], name: '当前评分' }]
+  }]
+});
+
+/* ============================================================
+ * 算力中心 TOP6 列表
+ * ============================================================ */
+const TOP_CENTERS = [
+  '北京-华北枢纽', '上海-华东枢纽', '广州-华南枢纽',
+  '成都-西南枢纽', '武汉-中部枢纽', '西安-西北枢纽'
+];
+function renderComputeList() {
+  const list = $('#computeList');
+  list.innerHTML = TOP_CENTERS.map((name, i) => {
+    const load = randInt(55, 96);
+    const color = load >= 85 ? 'var(--orange)' : (load >= 70 ? 'var(--cyan)' : 'var(--green)');
+    return `
+      <div class="compute-row">
+        <span class="rank">#${String(i+1).padStart(2,'0')}</span>
+        <span class="name">${name}</span>
+        <div class="bar" style="--w:${load}%"></div>
+        <span class="pct" style="color:${color}">${load}%</span>
+      </div>`;
+  }).join('');
+}
+renderComputeList();
+
+/* ============================================================
+ * 实时数据更新
+ * ============================================================ */
+setInterval(() => {
+  // KPI
+  const compute = 128.6 + rand(-0.2, 0.2);
+  $('#kpiCompute').textContent = compute.toFixed(1);
+  $('#kpiLatency').textContent = (12.6 + rand(-0.3, 0.3)).toFixed(1);
+  $('#kpiBandwidth').textContent = (68.4 + rand(-2, 2)).toFixed(1);
+
+  // 地图统计
+  $('#msTotal').textContent = 36;
+  $('#msEdge').textContent = 4000 + randInt(100, 160);
+  $('#msTask').textContent = (2.86 + rand(-0.1, 0.1)).toFixed(2);
+  $('#msHealth').textContent = (98.6 + rand(-0.3, 0.3)).toFixed(1);
+
+  // 流量滚动
+  trafficIn.shift(); trafficIn.push(randInt(420, 780));
+  trafficOut.shift(); trafficOut.push(randInt(360, 720));
+  trafficChart.setOption({
+    series: [{ data: trafficIn }, { data: trafficOut }]
+  });
+
+  // QoS 雷达小幅变化
+  qosChart.setOption({
+    series: [{
+      data: [{
+        value: [
+          randInt(88, 98), randInt(88, 96), randInt(92, 98),
+          randInt(95, 99), randInt(88, 96), randInt(92, 98)
+        ],
+        name: '当前评分'
+      }]
+    }]
+  });
+
+  // 算力列表
+  renderComputeList();
+}, 2500);
+
+/* ============================================================
+ * 告警滚动条 (无缝循环)
+ * ============================================================ */
+(function () {
+  const el = $('#alertText');
+  const base = el.innerHTML;
+  el.innerHTML = base + ' · ' + base;
+})();
+
+/* ============================================================
+ * 响应窗口尺寸
+ * ============================================================ */
+window.addEventListener('resize', () => {
+  resourceChart.resize();
+  trafficChart.resize();
+  qosChart.resize();
+  mapChart.resize();
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,254 @@
+{% extends "resource_base.html" %}
+
+{% block resource_content %}
+<div class="resource-padded">
+  <div class="resource-page__header">
+    <div>
+      <h1 class="resource-page__title">集群列表</h1>
+      <p class="resource-page__subtitle">资源管控中心 / 全部集群</p>
+    </div>
+  </div>
+
+  <div class="panel" style="flex:1;min-height:0;">
+    <div class="clusters-table-wrap">
+      <table class="clusters-table" id="clustersTable">
+        <thead>
+          <tr>
+            <th>集群</th>
+            <th>状态</th>
+            <th>区域</th>
+            <th>省份</th>
+            <th>节点</th>
+            <th>CPU 核数</th>
+            <th>总内存</th>
+            <th>CPU 使用率</th>
+            <th>内存使用率</th>
+            <th>负载 (1m)</th>
+            <th>最高温度</th>
+            <th>GPU 卡数</th>
+            <th>GPU 利用率</th>
+          </tr>
+        </thead>
+        <tbody><tr><td colspan="13" class="clusters-table__empty">加载中...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<style>
+  .resource-padded {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    gap: 16px;
+    padding: 16px;
+    overflow: hidden;
+  }
+  .resource-page__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    flex-shrink: 0;
+  }
+  .resource-page__title {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    margin: 0;
+  }
+  .resource-page__subtitle {
+    font-size: 12px;
+    color: var(--color-text-secondary);
+    margin: 4px 0 0;
+  }
+  .clusters-table-wrap {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+  }
+  .clusters-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  .clusters-table thead th {
+    text-align: left;
+    font-weight: 500;
+    color: var(--color-text-secondary);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-bg-secondary);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    white-space: nowrap;
+  }
+  .clusters-table tbody td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--color-border);
+    color: var(--color-text-primary);
+    font-family: var(--font-mono);
+    white-space: nowrap;
+  }
+  .clusters-table tbody tr {
+    cursor: pointer;
+    transition: background var(--transition-fast);
+  }
+  .clusters-table tbody tr:hover {
+    background: var(--color-bg-card-hover);
+  }
+  .clusters-table__empty {
+    text-align: center;
+    padding: 32px !important;
+    color: var(--color-text-muted);
+  }
+  .cluster-name {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .cluster-name__main {
+    font-weight: 600;
+    color: var(--color-text-primary);
+    font-family: var(--font-sans, inherit);
+    font-size: 13px;
+  }
+  .cluster-name__id {
+    font-size: 10px;
+    color: var(--color-text-muted);
+  }
+  .nodes-cell strong {
+    color: var(--color-text-primary);
+    font-size: 13px;
+    margin-right: 2px;
+  }
+  .nodes-cell .total {
+    color: var(--color-text-muted);
+    font-size: 11px;
+  }
+  .usage-cell {
+    display: grid;
+    grid-template-columns: 60px 1fr;
+    align-items: center;
+    gap: 8px;
+  }
+  .usage-cell__bar {
+    width: 100%;
+    height: 6px;
+    background: var(--color-bg-secondary);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .usage-cell__fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.3s ease;
+  }
+  .usage-cell__fill--low { background: var(--color-success); }
+  .usage-cell__fill--mid { background: var(--color-warning); }
+  .usage-cell__fill--high { background: var(--color-danger); }
+  .usage-cell__text {
+    text-align: right;
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+</style>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+  const STATUS_LABEL = {
+    healthy: '运行中',
+    warning: '部分离线',
+    offline: '离线',
+    unknown: '未知',
+  };
+  const STATUS_CLASS = {
+    healthy: 'status--healthy',
+    warning: 'status--warning',
+    offline: 'status--offline',
+    unknown: 'status--offline',
+  };
+
+  function fmtBytes(n) {
+    if (n == null) return '—';
+    const units = ['B', 'KB', 'GB', 'TB', 'PB'];
+    let i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return n.toFixed(n >= 100 ? 0 : 1) + ' ' + units[i];
+  }
+
+  function pctClass(v) {
+    if (v == null) return '';
+    if (v >= 85) return 'usage-cell__fill--high';
+    if (v >= 60) return 'usage-cell__fill--mid';
+    return 'usage-cell__fill--low';
+  }
+
+  function usageCell(pct) {
+    if (pct == null) return '<div class="usage-cell__text">—</div>';
+    const w = Math.min(100, pct);
+    return `<div class="usage-cell">
+      <div class="usage-cell__bar"><div class="usage-cell__fill ${pctClass(pct)}" style="width:${w}%"></div></div>
+      <div class="usage-cell__text">${pct.toFixed(1)}%</div>
+    </div>`;
+  }
+
+  function plainCell(value, suffix) {
+    if (value == null) return '<span style="color:var(--color-text-muted);">—</span>';
+    return value + (suffix || '');
+  }
+
+  function renderRow(c) {
+    const status = c.status || 'unknown';
+    return `<tr data-id="${c.id}">
+      <td>
+        <div class="cluster-name">
+          <span class="cluster-name__main">${c.name || c.id}</span>
+          <span class="cluster-name__id">${c.id}</span>
+        </div>
+      </td>
+      <td><span class="status ${STATUS_CLASS[status] || 'status--offline'}">${STATUS_LABEL[status] || status}</span></td>
+      <td style="font-family:var(--font-sans,inherit);">${c.region || '—'}</td>
+      <td style="font-family:var(--font-sans,inherit);">${c.province || '—'}</td>
+      <td class="nodes-cell"><strong>${c.online_nodes ?? 0}</strong><span class="total">/ ${c.total_nodes ?? 0}</span></td>
+      <td>${plainCell(c.cpu_cores, ' 核')}</td>
+      <td>${plainCell(c.mem_total_bytes != null ? fmtBytes(c.mem_total_bytes) : null)}</td>
+      <td>${usageCell(c.cpu_usage)}</td>
+      <td>${usageCell(c.mem_usage)}</td>
+      <td>${plainCell(c.load1 != null ? c.load1.toFixed(2) : null)}</td>
+      <td>${plainCell(c.max_temp_c != null ? c.max_temp_c.toFixed(1) + '°C' : null)}</td>
+      <td>${c.gpu_count > 0 ? `<strong>${c.gpu_count}</strong> 卡` : '<span style="color:var(--color-text-muted);">—</span>'}</td>
+      <td>${usageCell(c.gpu_util)}</td>
+    </tr>`;
+  }
+
+  async function refresh() {
+    const tbody = document.querySelector('#clustersTable tbody');
+    try {
+      const r = await fetch('/api/metrics/clusters');
+      const data = await r.json();
+      const items = data.items || [];
+      if (!items.length) {
+        tbody.innerHTML = '<tr><td colspan="13" class="clusters-table__empty">暂无集群数据</td></tr>';
+        return;
+      }
+      tbody.innerHTML = items.map(renderRow).join('');
+      tbody.querySelectorAll('tr[data-id]').forEach((tr) => {
+        tr.addEventListener('click', () => {
+          const id = tr.dataset.id;
+          if (id) location.href = '/resource/clusters/' + encodeURIComponent(id);
+        });
+      });
+    } catch (e) {
+      tbody.innerHTML = '<tr><td colspan="13" class="clusters-table__empty">数据加载失败</td></tr>';
+    }
+  }
+
+  refresh();
+  setInterval(refresh, 10000);
+</script>
+{% endblock %}

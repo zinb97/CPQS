@@ -1,0 +1,323 @@
+"""
+Mininet Topology Generator - 中国移动 CMNET 骨干网拓扑
+- 与 netSim.py（ChinaNet/中国电信）解耦，独立文件
+- 层级：超级核心 → 大区中心 → 省网核心 → 城域接入
+- 规模可选：small/medium/large/full 四档（控制省数）
+- DPID 规则与项目 ChinaNet 一致：00000000{L:02x}{idx:02x}0001
+"""
+import argparse
+from enum import Enum
+from functools import partial
+
+from mininet.cli import CLI
+from mininet.link import TCLink
+from mininet.log import setLogLevel, info
+from mininet.net import Mininet
+from mininet.node import OVSSwitch, RemoteController
+from mininet.topo import Topo
+
+CLI.prompt = 'cmnet> '
+
+
+# ==============================================================================
+# 常量定义
+# ==============================================================================
+class CMNetLevel(Enum):
+    """CMNET 层级标识（写入 DPID 第 1 位）"""
+    SUPER_CORE = 1  # 超级核心（北京/上海/广州）
+    REGION     = 2  # 大区中心
+    PROVINCE   = 3  # 省网核心
+    METRO      = 4  # 城域接入
+
+
+# 3 超级核心（CMNET 全国三大国际出口/超级核心）
+SUPER_CORE_CITIES = [
+    # (code, idx, 中文名)
+    ('bj', 1, '北京'),
+    ('sh', 2, '上海'),
+    ('gz', 3, '广州'),
+]
+
+# 5 大区中心（CMNET 骨干大区节点）
+REGION_CITIES = [
+    ('wh', 4, '武汉'),
+    ('cd', 5, '成都'),
+    ('xa', 6, '西安'),
+    ('nj', 7, '南京'),
+    ('sy', 8, '沈阳'),
+]
+
+# 31 省/直辖市/自治区（按 GB/T 2260 排序）
+PROVINCES = [
+    ('bj',  1, '北京'),   ('tj',  2, '天津'),   ('sh',  3, '上海'),
+    ('cq',  4, '重庆'),   ('hb',  5, '河北'),   ('sx',  6, '山西'),
+    ('ln',  7, '辽宁'),   ('jl',  8, '吉林'),   ('hl',  9, '黑龙江'),
+    ('js', 10, '江苏'),   ('zj', 11, '浙江'),   ('ah', 12, '安徽'),
+    ('fj', 13, '福建'),   ('jx', 14, '江西'),   ('sd', 15, '山东'),
+    ('ha', 16, '河南'),   ('hb2',17, '湖北'),   ('hn', 18, '湖南'),
+    ('gd', 19, '广东'),   ('gx', 20, '广西'),   ('hn2',21, '海南'),
+    ('sc', 22, '四川'),   ('gz2',23, '贵州'),   ('yn', 24, '云南'),
+    ('xz', 25, '西藏'),   ('sn', 26, '陕西'),   ('gs', 27, '甘肃'),
+    ('qh', 28, '青海'),   ('nx', 29, '宁夏'),   ('xj', 30, '新疆'),
+    ('nm', 31, '内蒙古'),
+]
+
+# 规模档位 → 启用的省数
+SCALE_PROVINCES = {
+    'small':  5,    # 演示用，5 省
+    'medium': 10,   # 区域测试，10 省
+    'large':  23,   # 多数省份
+    'full':   31,   # 全量 31 省
+}
+
+
+# ==============================================================================
+# CMNET 拓扑类
+# ==============================================================================
+class CMNetTopo(Topo):
+    """
+    中国移动 CMNET 骨干网拓扑
+
+    层级：
+      L1 超级核心 (3 节点：北京/上海/广州，全互联)
+      L2 大区中心 (5 节点：武汉/成都/西安/南京/沈阳，环形双平面)
+      L3 省网核心 (5/10/23/31 节点，根据 scale)
+      L4 城域接入 (每省 prov_width×prov_depth 树形)
+
+    DPID 规则（与 ChinaNet 一致）：
+      00000000{L:02x}{idx:02x}0001
+      L1=超级核心 L2=大区 L3=省 L4=城域
+
+    命名：
+      S1~S3   超级核心
+      R4~R8   大区
+      P1~P31  省网
+      M{a}{b} 城域（a=省号, b=层内编号）
+
+    链路参数（bw Mbps / delay ms / loss %）：
+      超级核心互联  400 / 18~30 / 0.1
+      大区上联核心  400 / 5~15 / 0.1
+      大区双平面    200 / 8~12 / 0.1
+      省上联        200 / 3~8  / 0.1
+      城域接入      100 / 1~2  / 0
+    """
+    def __init__(self, scale='medium', prov_depth=2, prov_width=2, **params):
+        if scale not in SCALE_PROVINCES:
+            raise ValueError(
+                f"scale 必须是 {list(SCALE_PROVINCES.keys())} 之一，得到 {scale!r}"
+            )
+        if prov_depth < 0 or prov_depth > 4:
+            raise ValueError('prov_depth 必须在 [0, 4]')
+        if prov_width < 1 or prov_width > 6:
+            raise ValueError('prov_width 必须在 [1, 6]')
+
+        self.scale      = scale
+        self.prov_cnt   = SCALE_PROVINCES[scale]
+        self.prov_depth = prov_depth
+        self.prov_width = prov_width
+
+        # 节点容器
+        self.super_core = {}   # code -> switch
+        self.region     = {}   # code -> switch
+        self.province   = {}   # code -> switch
+        self.metro      = []   # list[(prov_idx, switch)]
+
+        super().__init__(**params)
+        self.build_topo()
+
+    # ---------- 构建入口 ----------
+    def build_topo(self):
+        info(f'\n*** CMNET 拓扑 | 规模={self.scale}({self.prov_cnt}省) '
+             f'| 城域树(深{self.prov_depth}×宽{self.prov_width})\n')
+        self._build_super_core()
+        self._build_region()
+        self._build_province()
+        if self.prov_depth > 0:
+            self._build_metro()
+
+    # ---------- L1 超级核心 ----------
+    def _build_super_core(self):
+        for code, idx, name in SUPER_CORE_CITIES:
+            dpid = f'00000000{CMNetLevel.SUPER_CORE.value:02x}{idx:02x}0001'
+            self.super_core[code] = self.addSwitch(
+                f'S{idx}', dpid=dpid, protocols='OpenFlow13',
+            )
+            info(f'  [L1 超级核心] S{idx} {name}  dpid={dpid}\n')
+
+        # 全互联（现实参考：北京-上海 RTT ~25ms、北京-广州 ~30ms、上海-广州 ~18ms）
+        self._add(self.super_core['bj'], self.super_core['sh'], 400, '25ms', 0.1)
+        self._add(self.super_core['bj'], self.super_core['gz'], 400, '30ms', 0.1)
+        self._add(self.super_core['sh'], self.super_core['gz'], 400, '18ms', 0.1)
+
+        # 每个超级核心挂 1 个测试主机
+        for i, code in enumerate(['bj', 'sh', 'gz']):
+            host = self.addHost(f'ts{i+1}', ip=f'10.0.1.10{i+1}/24')
+            self.addLink(self.super_core[code], host)
+
+    # ---------- L2 大区中心 ----------
+    def _build_region(self):
+        for code, idx, name in REGION_CITIES:
+            dpid = f'00000000{CMNetLevel.REGION.value:02x}{idx:02x}0001'
+            self.region[code] = self.addSwitch(
+                f'R{idx}', dpid=dpid, protocols='OpenFlow13',
+            )
+            info(f'  [L2 大区]     R{idx} {name}  dpid={dpid}\n')
+
+        # 大区上联最近的超级核心（按地理就近）
+        # 格式：(大区 code, 核心 code, 延迟)
+        uplink = [
+            ('wh', 'bj', '15ms'),  # 武汉  -> 北京
+            ('cd', 'gz', '20ms'),  # 成都  -> 广州
+            ('xa', 'bj', '12ms'),  # 西安  -> 北京
+            ('nj', 'sh', '5ms'),   # 南京  -> 上海
+            ('sy', 'bj', '10ms'),  # 沈阳  -> 北京
+        ]
+        for code, core_code, delay in uplink:
+            self._add(self.region[code], self.super_core[core_code], 400, delay, 0.1)
+
+        # 大区之间环形（双平面保护）
+        pairs = [
+            ('wh', 'xa'), ('xa', 'cd'), ('cd', 'gz'),
+            ('gz', 'sh'), ('sh', 'nj'), ('nj', 'wh'),
+            ('sy', 'wh'),  # 沈阳额外回环到武汉，避免单边
+        ]
+        for a, b in pairs:
+            self._add(self.region[a], self.region[b], 200, '10ms', 0.1)
+
+    # ---------- L3 省网核心 ----------
+    def _build_province(self):
+        # 省 → 父节点 (大区或超级核心)，按现实地理就近映射
+        province_to_parent = {
+            # 华北 -> 北京
+            'tj': ('S', 1), 'hb': ('S', 1), 'sx': ('S', 1), 'nm': ('S', 1),
+            'xj': ('S', 1),  # 新疆就近北京（远距离）
+            # 东北 -> 沈阳
+            'ln': ('R', 8), 'jl': ('R', 8), 'hl': ('R', 8),
+            # 华东 -> 上海 / 南京
+            'js': ('R', 7), 'zj': ('S', 2), 'ah': ('R', 7),
+            'fj': ('S', 2), 'jx': ('R', 7), 'sd': ('S', 1),
+            # 华中 -> 武汉
+            'ha': ('R', 4), 'hb2': ('R', 4), 'hn': ('R', 4),
+            # 华南 -> 广州
+            'gd': ('S', 3), 'gx': ('S', 3), 'hn2': ('S', 3),
+            # 西南 -> 成都
+            'cq': ('R', 5), 'sc': ('R', 5), 'gz2': ('R', 5), 'yn': ('R', 5),
+            # 西北 -> 西安
+            'xz': ('R', 6), 'sn': ('R', 6), 'gs': ('R', 6),
+            'qh': ('R', 6), 'nx': ('R', 6),
+        }
+        # name -> switch 反查表（覆盖 L1+L2）
+        name_to_switch = {s.name: s for s in self.super_core.values()}
+        name_to_switch.update({s.name: s for s in self.region.values()})
+
+        for code, idx, name in PROVINCES[:self.prov_cnt]:
+            dpid = f'00000000{CMNetLevel.PROVINCE.value:02x}{idx:02x}0001'
+            sw = self.addSwitch(f'P{idx}', dpid=dpid, protocols='OpenFlow13')
+            self.province[code] = sw
+            info(f'  [L3 省网]     P{idx} {name}  dpid={dpid}\n')
+
+            # 上联父节点
+            kind, p_idx = province_to_parent.get(code, ('S', 1))
+            parent_name = f'S{p_idx}' if kind == 'S' else f'R{p_idx}'
+            parent = name_to_switch[parent_name]
+            self._add(sw, parent, 200, '5ms', 0.1)
+
+            # 每省 1 个主机
+            host = self.addHost(f'hp{idx}', ip=f'10.0.2.{idx}/24')
+            self.addLink(sw, host)
+
+    # ---------- L4 城域接入 ----------
+    def _build_metro(self):
+        # 每省下挂 prov_width × prov_depth 树
+        for code, prov_sw in self.province.items():
+            prov_idx = next(i for c, i, _ in PROVINCES if c == code)
+            # 第 1 层城域直接连省核心
+            layer1 = []
+            for w in range(1, self.prov_width + 1):
+                dpid = f'00000000{CMNetLevel.METRO.value:02x}{prov_idx:02x}{w:02x}'
+                sw = self.addSwitch(f'M{prov_idx}{w}', dpid=dpid, protocols='OpenFlow13')
+                self._add(prov_sw, sw, 100, '1ms', 0)
+                layer1.append(sw)
+            # 后续层
+            current = layer1
+            for d in range(2, self.prov_depth + 1):
+                nxt = []
+                for i, sw in enumerate(current, start=1):
+                    dpid = f'00000000{CMNetLevel.METRO.value:02x}{prov_idx:02x}{d}{i:01x}'
+                    leaf = self.addSwitch(f'M{prov_idx}{d}{i}', dpid=dpid, protocols='OpenFlow13')
+                    self._add(sw, leaf, 40, '1ms', 0)
+                    nxt.append(leaf)
+                current = nxt
+            # 末层挂主机
+            for i, sw in enumerate(current, start=1):
+                host = self.addHost(f'hm{prov_idx}{i}', ip=f'10.0.3.{prov_idx}{i:02d}/24')
+                self.addLink(sw, host)
+                self.metro.append((prov_idx, sw))
+
+    # ---------- 辅助 ----------
+    def _add(self, a, b, bw, delay, loss):
+        self.addLink(a, b, bw=bw, delay=delay, loss=loss, cls=TCLink)
+
+
+# ==============================================================================
+# 拓扑注册 & 启动入口
+# ==============================================================================
+topos = {
+    'cmnet': CMNetTopo,
+    'cmnet-small':  lambda **kw: CMNetTopo(scale='small',  **kw),
+    'cmnet-medium': lambda **kw: CMNetTopo(scale='medium', **kw),
+    'cmnet-large':  lambda **kw: CMNetTopo(scale='large',  **kw),
+    'cmnet-full':   lambda **kw: CMNetTopo(scale='full',   **kw),
+}
+
+
+def run_cmnet(scale='medium', prov_depth=2, prov_width=2, controller_ip='127.0.0.1'):
+    """启动 CMNET 拓扑"""
+    topo = CMNetTopo(scale=scale, prov_depth=prov_depth, prov_width=prov_width)
+    switch = partial(OVSSwitch, protocols='OpenFlow13')
+    net = Mininet(
+        topo=topo,
+        controller=lambda n: RemoteController(n, ip=controller_ip),
+        switch=switch,
+    )
+    net.start()
+    info(
+        f'\n✅ CMNET 拓扑启动完成 | scale={scale} '
+        f'| 省数={topo.prov_cnt} | 城域树(深{prov_depth}×宽{prov_width})\n'
+        f'   节点统计：超级核心 {len(topo.super_core)} | '
+        f'大区 {len(topo.region)} | '
+        f'省网 {len(topo.province)} | '
+        f'城域 {len(topo.metro)}\n'
+    )
+    CLI(net)
+    net.stop()
+
+
+if __name__ == '__main__':
+    setLogLevel('info')
+    parser = argparse.ArgumentParser(description='Mininet CMNET 拓扑仿真工具')
+    parser.add_argument(
+        '-s', '--scale',
+        default='medium',
+        choices=list(SCALE_PROVINCES.keys()),
+        help='规模档位（控制省数）：small=5 medium=10 large=23 full=31',
+    )
+    parser.add_argument(
+        '--prov-depth', type=int, default=2,
+        help='每省城域树深度（0=不建城域，1~4）',
+    )
+    parser.add_argument(
+        '--prov-width', type=int, default=2,
+        help='每省城域树每层宽度（1~6）',
+    )
+    parser.add_argument(
+        '--controller-ip', default='127.0.0.1',
+        help='RYU/ONOS 控制器 IP',
+    )
+    args = parser.parse_args()
+    run_cmnet(
+        scale=args.scale,
+        prov_depth=args.prov_depth,
+        prov_width=args.prov_width,
+        controller_ip=args.controller_ip,
+    )
