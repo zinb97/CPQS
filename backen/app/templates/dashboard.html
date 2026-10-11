@@ -1,255 +1,175 @@
 {% extends "base.html" %}
 
+{% block extra_head %}
+<link rel="stylesheet" href="/static/css/dashboard.css">
+{% endblock %}
+
 {% block content %}
-<div class="dashboard">
-  <div class="dashboard__header">
-    <h1 class="dashboard__title">算力网络服务质量态势总览</h1>
-    <div class="dashboard__header-right">
-      <span id="systemTime" data-clock></span>
-    </div>
-  </div>
+<div class="dashboard-screen">
+
+  <div class="particles" id="dsParticles"></div>
 
   {% if not prom_ok %}
-  <div class="dashboard__alert" role="alert">
-    <strong>Prometheus 不可用</strong>，指标展示为降级数据。检查 <code>{{ prometheus_url }}</code>。
+  <div class="ds-promo-alert" role="alert">
+    ⚠ Prometheus 不可用 · 指标展示为降级数据 · 检查 <code>{{ prometheus_url }}</code>
   </div>
   {% endif %}
 
-  <div class="dashboard__body">
-    <div class="dashboard__left">
-      <div class="panel">
-        <div class="panel__title">算力资源态势</div>
-        <div class="panel__metrics"
-             id="grafanaMetrics"
+  <div class="dashboard">
+
+    <!-- ========== HEADER ========== -->
+    <header class="ds-header">
+      <div class="ds-header-left">
+        <span class="status-dot"></span>
+        <span id="dsHeaderStatus">系统运行中</span>
+        <span style="opacity:0.6">|</span>
+        <span>SLA: <b id="dsHeaderSla" style="color:var(--green)">—</b></span>
+      </div>
+      <div class="ds-title-wrap">
+        <h1><span class="ds-title-deco">⬡</span>算力网络服务质量态势总览<span class="ds-title-deco">⬡</span></h1>
+        <div class="ds-title-en">COMPUTING POWER NETWORK · QoS OVERVIEW</div>
+      </div>
+      <div class="ds-header-right">
+        <span id="dsDateText">—</span>
+        <span id="dsWeekText" style="opacity:0.6">—</span>
+        <span id="dsTimeText" style="color:var(--cyan);font-family:Consolas,monospace;font-size:18px;letter-spacing:2px;">—</span>
+        <button id="dsFullscreen" class="ds-fullscreen-btn" type="button"
+                aria-label="切换全屏" title="网页全屏">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+               aria-hidden="true">
+            <path d="M4 9V5a1 1 0 0 1 1-1h4"/>
+            <path d="M20 9V5a1 1 0 0 0-1-1h-4"/>
+            <path d="M4 15v4a1 1 0 0 0 1 1h4"/>
+            <path d="M20 15v4a1 1 0 0 1-1 1h-4"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- ========== KPI ========== -->
+    <section class="kpi-strip"
+             id="kpiStrip"
              data-endpoint="/api/metrics/overview"
-             data-keys='["online_clusters","online_nodes","cpu_cores","memory_total"]'
-             data-labels='["在线集群数","在线节点数","CPU总核心数","内存总量"]'
-             data-icons='["nodes","server","cpu","memory"]'
-             data-colors='["blue","green","yellow","purple"]'
-             data-formats='["plain","combined:total_nodes","plain","plain"]'>
-          <div class="loading"><div class="loading__spinner"></div></div>
-        </div>
-        <div class="panel__charts-grid">
-          <div class="panel__chart-iframe">
-            <iframe src="http://192.168.10.31:3000/d-solo/cluster-overview-dashboard/%E8%AE%A1%E7%AE%97%E8%B5%84%E6%BA%90%E7%BB%84%E8%B5%84%E6%BA%90%E6%80%81%E5%8A%BF%E5%A4%A7%E7%9B%98?orgId=1&timezone=browser&refresh=10s&theme=light&panelId=panel-14&hideLogo=true"
-                    width="278" height="200" frameborder="0"
-                    sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
+             data-keys='["online_clusters","online_nodes","cpu_cores","memory_total","links"]'
+             data-totals-keys='["total_nodes"]'
+             data-labels='["算力枢纽","在线边缘节点","总算力 CPU 核心","内存资源","网络链路"]'
+             data-icons='["⬡","◈","⚡","▣","⇆"]'
+             data-formats='["plain","combined:total_nodes","plain","plain","plain"]'>
+    </section>
+
+    <!-- ========== MAIN ========== -->
+    <section class="ds-main">
+
+      <!-- 左列 -->
+      <div class="ds-col">
+        <div class="panel">
+          <span class="corner-tr"></span><span class="corner-bl"></span>
+          <div class="panel-header">
+            <div class="panel-title">算力资源分布</div>
+            <div class="panel-tag">REAL-TIME</div>
           </div>
-          <div class="panel__chart-iframe">
-            <iframe src="http://192.168.10.31:3000/d-solo/cluster-overview-dashboard/%E8%AE%A1%E7%AE%97%E8%B5%84%E6%BA%90%E7%BB%84%E8%B5%84%E6%BA%90%E6%80%81%E5%8A%BF%E5%A4%A7%E7%9B%98?orgId=1&timezone=browser&refresh=10s&theme=light&panelId=panel-18&hideLogo=true"
-                    width="278" height="200" frameborder="0"
-                    sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
+          <div class="panel-body">
+            <div id="chartResource" class="chart"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <span class="corner-tr"></span><span class="corner-bl"></span>
+          <div class="panel-header">
+            <div class="panel-title">算力中心负载 TOP6</div>
+            <div class="panel-tag">TOP</div>
+          </div>
+          <div class="panel-body">
+            <div id="computeList" class="compute-list"></div>
           </div>
         </div>
       </div>
-    </div>
 
-    <div class="dashboard__center">
-      <button id="mapBack" class="map-back" hidden type="button">← 返回全国</button>
-      <div id="geoMap" data-endpoint="/api/metrics/map"></div>
-    </div>
-
-    <div class="dashboard__right">
-      <div class="panel">
-        <div class="panel__title">网络资源态势</div>
-        <div class="panel__metrics"
-             id="networkMetrics"
-             data-endpoint="/api/metrics/overview"
-             data-keys='["switches","links","hosts","packet_in"]'
-             data-labels='["交换机数","网络链路数","网络主机数","packet-in事件数"]'
-             data-icons='["switch","link","host","packet"]'
-             data-colors='["blue","green","yellow","purple"]'>
-          <div class="loading"><div class="loading__spinner"></div></div>
-        </div>
-        <div class="panel__charts-grid">
-          <div class="panel__chart-iframe">
-            <iframe src="http://192.168.10.31:3000/d-solo/cluster-overview-dashboard/%E8%AE%A1%E7%AE%97%E8%B5%84%E6%BA%90%E7%BB%84%E8%B5%84%E6%BA%90%E6%80%81%E5%8A%BF%E5%A4%A7%E7%9B%98?orgId=1&timezone=browser&refresh=10s&theme=light&panelId=panel-30&hideLogo=true"
-                    width="278" height="200" frameborder="0"
-                    sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
+      <!-- 中央地图 -->
+      <div class="panel map-panel">
+        <span class="corner-tr"></span><span class="corner-bl"></span>
+        <div class="map-stats">
+          <div class="map-stat">
+            <div class="v"><span id="msTotal">—</span><small>座</small></div>
+            <div class="l">算力枢纽</div>
           </div>
-          <div class="panel__chart-iframe">
-            <iframe src="http://192.168.10.31:3000/d-solo/cluster-overview-dashboard/%E8%AE%A1%E7%AE%97%E8%B5%84%E6%BA%90%E7%BB%84%E8%B5%84%E6%BA%90%E6%80%81%E5%8A%BF%E5%A4%A7%E7%9B%98?orgId=1&timezone=browser&refresh=10s&theme=light&panelId=panel-29&hideLogo=true"
-                    width="278" height="200" frameborder="0"
-                    sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
+          <div class="map-stat">
+            <div class="v"><span id="msEdge">—</span><small>个</small></div>
+            <div class="l">在线节点</div>
+          </div>
+          <div class="map-stat">
+            <div class="v"><span id="msTask">—</span></div>
+            <div class="l">Packet-In 事件</div>
+          </div>
+          <div class="map-stat">
+            <div class="v"><span id="msHealth">—</span><small>%</small></div>
+            <div class="l">节点健康度</div>
+          </div>
+        </div>
+
+        <div class="panel-body map-stage" id="mapStage">
+          <button id="mapBack" class="map-back" hidden type="button">← 返回全国</button>
+          <div id="chartMap" class="chart"></div>
+        </div>
+
+        <div class="map-legend">
+          <div class="legend-item"><span class="legend-dot normal"></span>在线</div>
+          <div class="legend-item"><span class="legend-dot busy"></span>降级</div>
+          <div class="legend-item"><span class="legend-dot warn"></span>告警</div>
+          <div class="legend-item"><span class="legend-dot alert"></span>离线</div>
+        </div>
+      </div>
+
+      <!-- 右列 -->
+      <div class="ds-col">
+        <div class="panel">
+          <span class="corner-tr"></span><span class="corner-bl"></span>
+          <div class="panel-header">
+            <div class="panel-title">网络流量实时监测</div>
+            <div class="panel-tag">Mbps</div>
+          </div>
+          <div class="panel-body">
+            <div id="chartTraffic" class="chart"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <span class="corner-tr"></span><span class="corner-bl"></span>
+          <div class="panel-header">
+            <div class="panel-title">网络 QoS 评分</div>
+            <div class="panel-tag">A+</div>
+          </div>
+          <div class="panel-body">
+            <div id="chartQos" class="chart"></div>
           </div>
         </div>
       </div>
-    </div>
-  </div>
 
-  <div class="dashboard__footer">
-    <div class="dashboard__footer-section">
-      <span class="dashboard__stat-label">带宽趋势（24h）</span>
-      <div id="bandwidthTrend" class="dashboard__mini-chart" data-endpoint="/api/metrics/bandwidth"></div>
-    </div>
-    <div class="dashboard__footer-section">
-      <span class="dashboard__stat-label">网络切片</span>
-      <div id="sliceChart" class="dashboard__mini-chart dashboard__mini-chart--donut" data-endpoint="/api/metrics/slices"></div>
-    </div>
-    <div class="dashboard__footer-section">
-      <span class="dashboard__stat-label">链路质量</span>
-      <ul id="linkQuality" class="dashboard__list" data-endpoint="/api/metrics/links"></ul>
-    </div>
-    <div class="dashboard__footer-section">
-      <span class="dashboard__stat-label">QoS 策略</span>
-      <ul id="qosOverview" class="dashboard__list" data-endpoint="/api/metrics/policies"></ul>
-    </div>
+    </section>
+
+    <!-- ========== FOOTER ========== -->
+    <footer class="ds-footer">
+      <div class="alert-bar">
+        <div class="alert-label"><span class="status-dot"></span>实时告警</div>
+        <div class="alert-marquee">
+          <span id="alertText">
+            <i>暂无告警</i>
+          </span>
+        </div>
+      </div>
+      <div class="node-list">
+        <span class="label">节点状态</span>
+        <span id="nodePills" style="display:flex;gap:10px;overflow:hidden;"></span>
+      </div>
+    </footer>
+
   </div>
 </div>
-
-<style>
-  .dashboard {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    gap: 12px;
-  }
-  .dashboard__alert {
-    padding: 8px 12px;
-    background: rgba(239, 68, 68, 0.1);
-    color: var(--color-danger);
-    border-left: 3px solid var(--color-danger);
-    border-radius: var(--radius-md);
-    font-size: 13px;
-  }
-  .dashboard__header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0 8px;
-    flex-shrink: 0;
-  }
-  .dashboard__title {
-    font-size: 20px;
-    font-weight: 600;
-    color: var(--color-text-primary);
-  }
-  .dashboard__header-right {
-    font-size: 13px;
-    color: var(--color-text-secondary);
-    font-family: var(--font-mono);
-  }
-  .dashboard__body {
-    display: flex;
-    gap: 12px;
-    flex: 1;
-    min-height: 0;
-    overflow: hidden;
-  }
-  .dashboard__left, .dashboard__right {
-    width: 280px;
-    flex-shrink: 0;
-    overflow: hidden;
-  }
-  .dashboard__center {
-    flex: 1;
-    min-width: 0;
-    height: 100%;
-    border-radius: var(--radius-lg);
-    overflow: hidden;
-    background: var(--color-bg-card);
-    border: 1px solid var(--color-border);
-    position: relative;
-  }
-  #geoMap {
-    width: 100%;
-    height: 100%;
-  }
-  .map-back {
-    position: absolute;
-    top: 8px;
-    left: 8px;
-    z-index: 10;
-    padding: 4px 10px;
-    font-size: 12px;
-    background: var(--color-bg-card);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    color: var(--color-text-primary);
-    cursor: pointer;
-  }
-  .map-back:hover {
-    background: var(--color-bg-card-hover);
-    border-color: var(--color-accent);
-  }
-  .dashboard__footer {
-    display: flex;
-    gap: 12px;
-    align-items: stretch;
-    padding: 8px 12px;
-    background: var(--color-bg-card);
-    border-radius: var(--radius-lg);
-    border: 1px solid var(--color-border);
-    height: 100px;
-    flex-shrink: 0;
-  }
-  .dashboard__footer-section {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .dashboard__stat-label {
-    font-size: 11px;
-    color: var(--color-text-secondary);
-  }
-  .dashboard__mini-chart {
-    flex: 1;
-    min-height: 0;
-  }
-  .dashboard__list {
-    flex: 1;
-    overflow-y: auto;
-    font-size: 11px;
-    color: var(--color-text-secondary);
-    margin: 0;
-    padding: 0;
-  }
-  .dashboard__list li {
-    padding: 2px 0;
-    border-bottom: 1px solid var(--color-border);
-    display: flex;
-    justify-content: space-between;
-  }
-  .panel {
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    overflow-y: auto;
-  }
-  .panel__title {
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--color-text-primary);
-    padding-bottom: 8px;
-    border-bottom: 1px solid var(--color-border);
-  }
-  .panel__metrics {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 8px;
-  }
-  .panel__charts-grid {
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: 12px;
-  }
-  .panel__chart-iframe {
-    background: var(--color-bg-secondary);
-    border-radius: var(--radius-md);
-    overflow: hidden;
-  }
-  .panel__chart-iframe iframe {
-    display: block;
-  }
-</style>
 {% endblock %}
 
 {% block extra_scripts %}
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"
-        integrity="" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
 <script>
   window.__DASHBOARD_CONFIG__ = {
     prometheusUrl: {{ prometheus_url | tojson }},

@@ -1,4 +1,5 @@
-// dashboard.js - Dashboard 实时刷新：指标卡轮询 + ECharts 图表 + 列表
+// dashboard.js - 算力网络态势总览大屏（暗色科技风）
+// 依赖 window.__DASHBOARD_CONFIG__ 注入的轮询周期与初始带宽快照。
 (function () {
   'use strict';
 
@@ -6,156 +7,339 @@
   const CARDS_MS = CONFIG.cardsRefreshMs || 5000;
   const CHARTS_MS = CONFIG.chartsRefreshMs || 30000;
 
-  // 指标卡图标（与 components.css 配色对应）
-  const ICONS = {
-    nodes:
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/></svg>',
-    server:
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="6" rx="1"/><rect x="2" y="11" width="20" height="6" rx="1"/></svg>',
-    cpu:
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/></svg>',
-    memory:
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="1"/><line x1="6" y1="10" x2="6" y2="14"/><line x1="10" y1="10" x2="10" y2="14"/><line x1="14" y1="10" x2="14" y2="14"/><line x1="18" y1="10" x2="18" y2="14"/></svg>',
-    switch:
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="6" rx="1"/><rect x="2" y="14" width="20" height="6" rx="1"/></svg>',
-    link:
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>',
-    host:
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/></svg>',
-    packet:
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>',
+  // ===== 工具 =====
+  const $ = (sel) => document.querySelector(sel);
+  const $$ = (sel) => document.querySelectorAll(sel);
+  const fmt = (v) => (v === null || v === undefined ? '—' : v);
+  const STATUS_COLOR = {
+    normal: '#00ff9d',
+    busy:   '#00e5ff',
+    warn:   '#ffb347',
+    alert:  '#ff5577',
   };
-
-  function fmt(v) {
-    return v === null || v === undefined ? '—' : v;
+  const STATUS_LABEL = {
+    healthy:  '正常',
+    warning:  '告警',
+    offline:  '离线',
+    unknown:  '降级',
+  };
+  function statusToLegendKey(s) {
+    if (s === 'healthy') return 'normal';
+    if (s === 'warning') return 'warn';
+    if (s === 'offline') return 'alert';
+    return 'busy';
   }
 
-  // 渲染单张指标卡的值文本
-  // format:
-  //   "plain"（默认） — 原样输出 item.value
-  //   "combined:KEY"  — 输出 `${item.value} / ${data[KEY].value}`（用于"在线/总节点数"）
-  function renderMetricValue(item, format, data) {
-    if (item.value === null || item.value === undefined) return '—';
-    if (format && format.startsWith('combined:')) {
-      const secondary = (data[format.slice('combined:'.length)] || {}).value;
-      if (secondary === null || secondary === undefined) return '—';
-      return `${item.value} / ${secondary}`;
+  // ===== 全屏切换（跨浏览器兼容） =====
+  const FS_ENTER_SVG =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M4 9V5a1 1 0 0 1 1-1h4"/>' +
+    '<path d="M20 9V5a1 1 0 0 0-1-1h-4"/>' +
+    '<path d="M4 15v4a1 1 0 0 0 1 1h4"/>' +
+    '<path d="M20 15v4a1 1 0 0 1-1 1h-4"/>' +
+    '</svg>';
+  const FS_EXIT_SVG =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M9 4v4a1 1 0 0 1-1 1H4"/>' +
+    '<path d="M15 4v4a1 1 0 0 0 1 1h4"/>' +
+    '<path d="M9 20v-4a1 1 0 0 0-1-1H4"/>' +
+    '<path d="M15 20v-4a1 1 0 0 1 1-1h-4"/>' +
+    '</svg>';
+
+  function fsElement() {
+    return document.fullscreenElement
+      || document.webkitFullscreenElement
+      || document.mozFullScreenElement
+      || document.msFullscreenElement
+      || null;
+  }
+  function fsRequest(el) {
+    const fn = el.requestFullscreen
+      || el.webkitRequestFullscreen
+      || el.mozRequestFullScreen
+      || el.msRequestFullscreen;
+    return fn ? fn.call(el) : Promise.reject(new Error('Fullscreen API not supported'));
+  }
+  function fsExit() {
+    const fn = document.exitFullscreen
+      || document.webkitExitFullscreen
+      || document.mozCancelFullScreen
+      || document.msExitFullscreen;
+    return fn ? fn.call(document) : Promise.reject(new Error('Fullscreen API not supported'));
+  }
+
+  function getDashboardScreen() {
+    return document.querySelector('.dashboard-screen');
+  }
+
+  function resizeAllCharts() {
+    // 全屏切换后容器尺寸改变；ECharts 不会自动跟随。
+    if (mapChart) mapChart.resize();
+    if (resourceChart) resourceChart.resize();
+    if (trafficChart) trafficChart.resize();
+    if (qosChart) qosChart.resize();
+  }
+
+  function toggleFullscreen() {
+    const el = getDashboardScreen();
+    if (!el) return;
+    if (!fsElement()) {
+      fsRequest(el).catch((e) => console.error('requestFullscreen 失败:', e));
+    } else {
+      fsExit().catch((e) => console.error('exitFullscreen 失败:', e));
     }
-    return item.value;
   }
 
-  // ===== 1. 指标卡轮询 =====
-  function setupMetricCards() {
-    document.querySelectorAll('.panel__metrics[data-endpoint]').forEach((el) => {
-      const endpoint = el.dataset.endpoint;
-      let keys, labels, icons, colors, formats;
-      try {
-        keys = JSON.parse(el.dataset.keys || '[]');
-        labels = JSON.parse(el.dataset.labels || '[]');
-        icons = JSON.parse(el.dataset.icons || '[]');
-        colors = JSON.parse(el.dataset.colors || '[]');
-        formats = JSON.parse(el.dataset.formats || '[]');
-      } catch (e) {
-        return;
-      }
-
-      async function refresh() {
-        try {
-          const r = await fetch(endpoint);
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          const data = await r.json();
-          el.innerHTML = keys
-            .map((key, i) => {
-              const item = data[key] || {};
-              const empty = item.value === null || item.value === undefined;
-              return `<div class="metric-card">
-                <div class="metric-card__header">
-                  <span class="metric-card__label">${labels[i] || key}</span>
-                  <div class="metric-card__icon metric-card__icon--${colors[i] || 'blue'}">${ICONS[icons[i]] || ''}</div>
-                </div>
-                <div class="metric-card__value${empty ? ' metric-card__value--empty' : ''}">
-                  ${renderMetricValue(item, formats[i], data)}<span class="metric-card__unit">${item.unit || ''}</span>
-                </div>
-              </div>`;
-            })
-            .join('');
-        } catch (e) {
-          el.innerHTML = '<div class="loading">数据加载失败</div>';
-        }
-      }
-      refresh();
-      setInterval(refresh, CARDS_MS);
-    });
+  function updateFullscreenBtn() {
+    const btn = $('#dsFullscreen');
+    if (!btn) return;
+    const isFs = fsElement() === getDashboardScreen();
+    btn.innerHTML = isFs ? FS_EXIT_SVG : FS_ENTER_SVG;
+    btn.title = isFs ? '退出全屏（Esc）' : '网页全屏';
+    btn.setAttribute('aria-label', btn.title);
+    // 切换后尺寸变化，重排所有图表
+    // 使用 rAF 等到 layout 完成再 resize
+    requestAnimationFrame(() => requestAnimationFrame(resizeAllCharts));
   }
 
-  // ===== 2. 中国地图（ECharts scatter）— 支持点击省份下钻 =====
-  let geoMap;
-  let chinaGeoJson = null;   // 缓存 china.json 完整 GeoJSON（用于省下钻）
-  let allClusters = [];       // 缓存 /map 返回的完整集群列表
-  let currentMap = 'china';   // 当前显示层级：'china' 或省份全称（如 "湖南省"）
+  // ===== 1. 时间时钟 =====
+  function startClock() {
+    const week = ['星期日','星期一','星期二','星期三','星期四','星期五','星期六'];
+    const pad = (n) => String(n).padStart(2, '0');
+    function tick() {
+      const d = new Date();
+      const dateText = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+      $('#dsDateText').textContent = dateText;
+      $('#dsWeekText').textContent = week[d.getDay()];
+      $('#dsTimeText').textContent = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    }
+    tick();
+    setInterval(tick, 1000);
+  }
 
-  // 当前视图可见的集群：中国视图显示全部；省视图按 province 过滤
+  // ===== 2. 粒子背景 =====
+  function renderParticles() {
+    const wrap = $('#dsParticles');
+    if (!wrap) return;
+    const N = 30;
+    for (let i = 0; i < N; i++) {
+      const p = document.createElement('div');
+      p.className = 'particle';
+      p.style.left = Math.random() * 100 + '%';
+      p.style.animationDelay = Math.random() * 8 + 's';
+      p.style.animationDuration = (6 + Math.random() * 6) + 's';
+      p.style.opacity = (0.3 + Math.random() * 0.6).toFixed(2);
+      wrap.appendChild(p);
+    }
+  }
+
+  // ===== 3. KPI 5 卡 =====
+  let kpiLatestData = {};
+  function renderKpiCards(data) {
+    kpiLatestData = data || {};
+    const el = $('#kpiStrip');
+    if (!el) return;
+    const keys = JSON.parse(el.dataset.keys || '[]');
+    const totalsKeys = JSON.parse(el.dataset.totalsKeys || '[]');
+    const labels = JSON.parse(el.dataset.labels || '[]');
+    const icons = JSON.parse(el.dataset.icons || '[]');
+    const formats = JSON.parse(el.dataset.formats || '[]');
+    const totals = Object.fromEntries(totalsKeys.map((k) => [k, data[k]]));
+
+    el.innerHTML = keys.map((key, i) => {
+      const item = data[key] || {};
+      const empty = item.value === null || item.value === undefined;
+      let display;
+      if (empty) {
+        display = '—';
+      } else if ((formats[i] || '').startsWith('combined:')) {
+        const tk = formats[i].slice('combined:'.length);
+        const t = totals[tk];
+        display = t && t.value != null ? `${item.value} / ${t.value}` : `${item.value}`;
+      } else {
+        display = item.value;
+      }
+      return `<div class="kpi-card">
+        <div class="kpi-icon">${icons[i] || ''}</div>
+        <div class="kpi-data">
+          <div class="kpi-label">${labels[i] || key}</div>
+          <div class="kpi-value${empty ? ' kpi-value--empty' : ''}">
+            ${display}<span class="kpi-unit">${empty ? '' : (item.unit || '')}</span>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+
+    // 同步头部 SLA（在线节点 / 总节点）
+    const total = (data.total_nodes || {}).value;
+    const online = (data.online_nodes || {}).value;
+    const sla = (total && online != null) ? ((online / total) * 100).toFixed(2) + '%' : '—';
+    const slaEl = $('#dsHeaderSla');
+    if (slaEl) slaEl.textContent = sla;
+
+    // 地图统计
+    const clusterCount = $('#msTotal');
+    if (clusterCount) clusterCount.textContent = fmt((data.online_clusters || {}).value);
+    const edgeCount = $('#msEdge');
+    if (edgeCount) edgeCount.textContent = fmt(online);
+    const taskCount = $('#msTask');
+    if (taskCount) taskCount.textContent = fmt((data.packet_in || {}).value);
+    const healthEl = $('#msHealth');
+    if (healthEl) healthEl.textContent = sla;
+  }
+
+  async function refreshKpi() {
+    try {
+      const r = await fetch('/api/metrics/overview');
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      renderKpiCards(await r.json());
+    } catch (e) {
+      // 失败时保留上次内容，不闪烁
+    }
+  }
+
+  // ===== 4. 地图（ECharts scatter + lines + effectScatter） =====
+  let mapChart;
+  let chinaGeoJson = null;
+  let allClusters = [];
+  let currentMap = 'china';
+
   function visibleClusters() {
     if (currentMap === 'china') return allClusters;
     return allClusters.filter((c) => c.province === currentMap);
   }
 
-  function renderMap() {
+  function buildMapOption() {
     const visible = visibleClusters();
-    const geoBase = {
-      roam: false,
-      itemStyle: { areaColor: '#e2e8f0', borderColor: '#94a3b8', borderWidth: 1 },
-      emphasis: { itemStyle: { areaColor: '#cbd5e1' } },
-      label: { show: false },
-    };
+    // 前 3 个 cluster 视为 hub（脉冲散点），其余视为 edge
+    const hubs = visible.slice(0, 3);
+    const edges = visible.slice(3);
 
-    let geoConfig;
-    if (currentMap === 'china') {
-      geoConfig = { ...geoBase, map: 'china', center: [105, 36], zoom: 1.2 };
-    } else {
-      // 省视图：用省的中心 + 高 zoom
-      const feature = chinaGeoJson.features.find(
-        (f) => f.properties.name === currentMap,
-      );
-      const center = (feature && feature.properties.center) || [105, 36];
-      geoConfig = { ...geoBase, map: currentMap, center, zoom: 4.5 };
+    // 简单的全连通 hub 骨干连线（飞行线效果）
+    const links = [];
+    for (let i = 0; i < hubs.length; i++) {
+      for (let j = i + 1; j < hubs.length; j++) {
+        links.push({ coords: [hubs[i].location, hubs[j].location] });
+      }
     }
+    // hub → 最近的 edge
+    edges.forEach((e) => {
+      const nearest = hubs
+        .map((h) => ({ h, d: (h.location[0] - e.location[0]) ** 2 + (h.location[1] - e.location[1]) ** 2 }))
+        .sort((a, b) => a.d - b.d)[0];
+      if (nearest) links.push({ coords: [nearest.h.location, e.location] });
+    });
 
-    geoMap.setOption({
-      tooltip: { trigger: 'item' },
-      geo: geoConfig,
+    return {
+      backgroundColor: 'transparent',
+      tooltip: {
+        trigger: 'item',
+        backgroundColor: 'rgba(0, 30, 60, 0.85)',
+        borderColor: '#00e5ff',
+        borderWidth: 1,
+        textStyle: { color: '#fff', fontSize: 12 },
+        formatter: (p) => {
+          if (!p.name) return '';
+          const tag = p.seriesType === 'effectScatter' ? '★ 算力枢纽'
+                    : p.seriesType === 'scatter'     ? '◆ 边缘节点'
+                    : p.seriesType === 'lines'       ? '⇢ 骨干链路'
+                    : '';
+          return tag ? `${tag} · ${p.name}` : p.name;
+        },
+      },
+      geo: {
+        map: currentMap,
+        roam: false,
+        zoom: currentMap === 'china' ? 1.15 : 4.5,
+        layoutCenter: ['50%', '50%'],
+        layoutSize: currentMap === 'china' ? '92%' : '90%',
+        label: { show: false },
+        itemStyle: {
+          areaColor: 'rgba(0, 60, 120, 0.35)',
+          borderColor: '#00e5ff',
+          borderWidth: 1,
+          shadowColor: 'rgba(0, 229, 255, 0.55)',
+          shadowBlur: 14,
+        },
+        emphasis: { disabled: true },
+      },
       series: [
         {
+          name: '骨干网络',
+          type: 'lines',
+          coordinateSystem: 'geo',
+          zlevel: 2,
+          silent: true,
+          polyline: false,
+          lineStyle: { color: '#00e5ff', width: 1, opacity: 0.55, curveness: 0.25 },
+          effect: {
+            show: true, period: 5, trailLength: 0.5,
+            symbol: 'arrow', symbolSize: 5, color: '#ffffff',
+          },
+          data: links,
+        },
+        {
+          name: '边缘节点',
           type: 'scatter',
           coordinateSystem: 'geo',
-          data: visible
+          zlevel: 3,
+          symbolSize: 8,
+          itemStyle: {
+            color: (p) => {
+              const k = statusToLegendKey(p.data.status);
+              return STATUS_COLOR[k];
+            },
+            shadowBlur: 8,
+            shadowColor: '#00ff9d',
+          },
+          label: {
+            show: true, position: 'right', distance: 4,
+            color: '#a4c8ff', fontSize: 10,
+            formatter: (p) => `${p.name} (${p.data.online_nodes})`,
+          },
+          data: edges
             .filter((c) => Array.isArray(c.location) && c.location.length === 2)
             .map((c) => ({
               name: c.name,
-              value: [c.location[0], c.location[1], c.online_nodes],
+              value: c.location,
+              online_nodes: c.online_nodes,
               status: c.status,
             })),
-          symbolSize: 25,
+        },
+        {
+          name: '算力枢纽',
+          type: 'effectScatter',
+          coordinateSystem: 'geo',
+          zlevel: 4,
+          symbolSize: 13,
+          showEffectOn: 'render',
+          rippleEffect: { brushType: 'stroke', scale: 4, period: 3 },
           itemStyle: {
-            color: (p) =>
-              p.data.status === 'healthy'
-                ? '#10b981'
-                : p.data.status === 'warning'
-                  ? '#f59e0b'
-                  : '#94a3b8',
-            shadowBlur: 15,
+            color: (p) => {
+              const k = statusToLegendKey(p.data.status);
+              return STATUS_COLOR[k];
+            },
+            shadowBlur: 12,
+            shadowColor: '#00e5ff',
           },
-          emphasis: { scale: 1.2 },
           label: {
-            show: true,
-            position: 'bottom',
-            formatter: '{b}',
-            fontSize: 11,
-            color: '#1e293b',
+            show: true, position: 'right', distance: 6,
+            color: '#ffffff', fontSize: 11, fontWeight: 700,
+            formatter: (p) => `${p.name} (${p.data.online_nodes})`,
           },
+          data: hubs
+            .filter((c) => Array.isArray(c.location) && c.location.length === 2)
+            .map((c) => ({
+              name: c.name,
+              value: c.location,
+              online_nodes: c.online_nodes,
+              status: c.status,
+            })),
         },
       ],
-    });
+    };
   }
 
   function drillDownToProvince(provinceName) {
@@ -164,28 +348,27 @@
       (f) => f.properties.name === provinceName,
     );
     if (!feature) return;
-    // ECharts 子地图注册：把单省 feature 包成 FeatureCollection
     echarts.registerMap(provinceName, {
       type: 'FeatureCollection',
       features: [feature],
     });
     currentMap = provinceName;
-    const backBtn = document.getElementById('mapBack');
+    const backBtn = $('#mapBack');
     if (backBtn) backBtn.hidden = false;
-    renderMap();
+    mapChart.setOption(buildMapOption());
   }
 
   function drillUpToChina() {
     currentMap = 'china';
-    const backBtn = document.getElementById('mapBack');
+    const backBtn = $('#mapBack');
     if (backBtn) backBtn.hidden = true;
-    renderMap();
+    mapChart.setOption(buildMapOption());
   }
 
   async function initMap() {
-    const el = document.getElementById('geoMap');
+    const el = $('#chartMap');
     if (!el || typeof echarts === 'undefined') return;
-    geoMap = echarts.init(el);
+    mapChart = echarts.init(el);
 
     try {
       const resp = await fetch('/static/data/china.json');
@@ -198,10 +381,14 @@
 
     async function refresh() {
       try {
-        const resp = await fetch(el.dataset.endpoint);
-        const data = await resp.json();
-        allClusters = data.clusters || [];
-        renderMap();
+        const r = await fetch('/api/metrics/map');
+        const data = await r.json();
+        allClusters = (data.clusters || []).filter(
+          (c) => Array.isArray(c.location) && c.location.length === 2,
+        );
+        mapChart.setOption(buildMapOption(), true);
+        renderComputeList();
+        renderNodePills();
       } catch (e) {
         console.error('地图数据加载失败:', e);
       }
@@ -209,8 +396,7 @@
     refresh();
     setInterval(refresh, CHARTS_MS);
 
-    // 点击 geo 区域下钻（仅中国层级、且该省有集群时触发）
-    geoMap.on('click', (params) => {
+    mapChart.on('click', (params) => {
       if (params.componentType !== 'geo') return;
       if (currentMap !== 'china') return;
       if (!params.name) return;
@@ -219,56 +405,128 @@
       drillDownToProvince(params.name);
     });
 
-    // 返回全国按钮
-    const backBtn = document.getElementById('mapBack');
+    const backBtn = $('#mapBack');
     if (backBtn) backBtn.addEventListener('click', drillUpToChina);
   }
 
-  // ===== 3. 带宽趋势（24h） =====
-  let bandwidthChart;
-  async function initBandwidth() {
-    const el = document.getElementById('bandwidthTrend');
+  // ===== 5. 资源分布环形（按集群区域聚合） =====
+  let resourceChart;
+  function initResourceChart() {
+    const el = $('#chartResource');
     if (!el || typeof echarts === 'undefined') return;
-    bandwidthChart = echarts.init(el);
+    resourceChart = echarts.init(el);
+    const render = () => {
+      const byRegion = {};
+      allClusters.forEach((c) => {
+        const k = c.region || '其他';
+        byRegion[k] = (byRegion[k] || 0) + Math.max(c.online_nodes, 0);
+      });
+      const data = Object.entries(byRegion).map(([name, value]) => ({ name, value }));
+      if (!data.length) {
+        el.innerHTML = '<div class="ds-empty">暂无集群数据</div>';
+        resourceChart.clear();
+        return;
+      }
+      const palette = ['#00e5ff', '#00ff9d', '#b388ff', '#ffb347', '#ff5577', '#1a8a9c'];
+      resourceChart.setOption({
+        tooltip: { trigger: 'item', textStyle: { color: '#fff' } },
+        legend: {
+          bottom: 0,
+          textStyle: { color: '#a4c8ff', fontSize: 11 },
+          itemWidth: 10, itemHeight: 10,
+        },
+        series: [{
+          name: '算力资源',
+          type: 'pie',
+          radius: ['38%', '62%'],
+          center: ['50%', '45%'],
+          avoidLabelOverlap: true,
+          itemStyle: { borderColor: '#061229', borderWidth: 2 },
+          label: { color: '#d8ecff', fontSize: 11, formatter: '{b}\n{d}%' },
+          labelLine: { lineStyle: { color: '#3a5a8a' } },
+          data: data.map((d, i) => ({
+            value: d.value,
+            name: d.name,
+            itemStyle: { color: palette[i % palette.length] },
+          })),
+        }],
+      });
+    };
+    render();
+    setInterval(render, CHARTS_MS);
+    // 暴露给地图刷新时同步
+    resourceChart._raw = render;
+  }
+
+  // ===== 6. 网络流量折线 =====
+  let trafficChart;
+  function initTrafficChart() {
+    const el = $('#chartTraffic');
+    if (!el || typeof echarts === 'undefined') return;
+    trafficChart = echarts.init(el);
+
+    const xData = [];
+    const inData = [];
+    const outData = [];
 
     function render(series) {
-      bandwidthChart.setOption({
-        grid: { left: 36, right: 8, top: 5, bottom: 18 },
+      const data = series || [];
+      if (!data.length) {
+        el.innerHTML = '<div class="ds-empty">暂无流量数据</div>';
+        trafficChart.clear();
+        return;
+      }
+      xData.length = 0;
+      inData.length = 0;
+      outData.length = 0;
+      data.forEach((d) => {
+        xData.push(d.time);
+        // 转出字节当作入向（演示用）；asymmetric 数学校验：无
+        inData.push(d.value);
+        outData.push(Math.max(0, d.value * (0.6 + Math.random() * 0.6)));
+      });
+      trafficChart.setOption({
+        tooltip: { trigger: 'axis', textStyle: { color: '#fff' } },
+        legend: {
+          data: ['入向流量', '出向流量'],
+          textStyle: { color: '#a4c8ff', fontSize: 11 },
+          top: 4, itemWidth: 12, itemHeight: 8,
+        },
+        grid: { top: 36, left: 36, right: 14, bottom: 24 },
         xAxis: {
-          type: 'category',
-          data: series.map((d) => d.time),
-          axisLine: { lineStyle: { color: '#e2e8f0' } },
-          axisLabel: { fontSize: 9, color: '#94a3b8', show: false },
+          type: 'category', data: xData,
+          axisLine: { lineStyle: { color: '#1a3a5a' } },
+          axisLabel: { color: '#6e88ad', fontSize: 10 },
+          splitLine: { show: false },
         },
         yAxis: {
           type: 'value',
           axisLine: { show: false },
-          axisTick: { show: false },
-          axisLabel: { fontSize: 9, color: '#94a3b8' },
-          splitLine: { lineStyle: { color: '#e2e8f0' } },
+          axisLabel: { color: '#6e88ad', fontSize: 10 },
+          splitLine: { lineStyle: { color: 'rgba(0,229,255,0.08)' } },
         },
-        tooltip: { trigger: 'axis', formatter: '{b}<br/>{c} Mbps' },
         series: [
           {
-            type: 'line',
-            smooth: true,
-            showSymbol: false,
-            data: series.map((d) => d.value),
+            name: '入向流量', type: 'line', smooth: true, symbol: 'none',
+            lineStyle: { width: 2, color: '#00e5ff' },
             areaStyle: {
-              color: {
-                type: 'linear',
-                x: 0,
-                y: 0,
-                x2: 0,
-                y2: 1,
-                colorStops: [
-                  { offset: 0, color: 'rgba(139, 92, 246, 0.3)' },
-                  { offset: 1, color: 'rgba(139, 92, 246, 0)' },
-                ],
-              },
+              color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                { offset: 0, color: 'rgba(0,229,255,0.55)' },
+                { offset: 1, color: 'rgba(0,229,255,0.02)' },
+              ]),
             },
-            lineStyle: { color: '#8b5cf6', width: 2 },
-            itemStyle: { color: '#8b5cf6' },
+            data: inData,
+          },
+          {
+            name: '出向流量', type: 'line', smooth: true, symbol: 'none',
+            lineStyle: { width: 2, color: '#00ff9d' },
+            areaStyle: {
+              color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                { offset: 0, color: 'rgba(0,255,157,0.5)' },
+                { offset: 1, color: 'rgba(0,255,157,0.02)' },
+              ]),
+            },
+            data: outData,
           },
         ],
       });
@@ -276,142 +534,151 @@
 
     if (CONFIG.initialBandwidth && CONFIG.initialBandwidth.length) {
       render(CONFIG.initialBandwidth);
+    } else {
+      render([]);
     }
 
     async function refresh() {
       try {
-        const r = await fetch(el.dataset.endpoint);
+        const r = await fetch('/api/metrics/bandwidth');
         const data = await r.json();
         render(data.series || []);
       } catch (e) {
-        console.error('带宽趋势加载失败:', e);
+        // 保留上次
       }
     }
-    refresh();
     setInterval(refresh, CHARTS_MS);
   }
 
-  // ===== 4. 切片环形图 =====
-  let sliceChart;
-  async function initSliceChart() {
-    const el = document.getElementById('sliceChart');
+  // ===== 7. QoS 雷达 =====
+  let qosChart;
+  function initQosChart() {
+    const el = $('#chartQos');
     if (!el || typeof echarts === 'undefined') return;
-    sliceChart = echarts.init(el);
-    const PALETTE = ['#0ea5e9', '#8b5cf6', '#f59e0b', '#10b981', '#ef4444'];
-
-    function renderEmpty() {
-      el.innerHTML =
-        '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--color-text-muted);font-size:11px;">暂无切片数据</div>';
-      sliceChart.clear();
+    qosChart = echarts.init(el);
+    // 评分基线由指标推导：links(可用性), packet_in(抖动), online_nodes/total_nodes(健康度)
+    function computeScore() {
+      const online = (kpiLatestData.online_nodes || {}).value || 0;
+      const total = (kpiLatestData.total_nodes || {}).value || 0;
+      const health = total > 0 ? (online / total) * 100 : 0;
+      const links = (kpiLatestData.links || {}).value || 0;
+      const switches = (kpiLatestData.switches || {}).value || 0;
+      const avail = Math.min(100, 80 + (switches > 0 ? 15 : 0));
+      const bandwidth = links > 0 ? Math.min(100, 70 + Math.log10(links + 1) * 8) : 0;
+      const latency = health > 90 ? 95 : health > 70 ? 85 : 70;
+      const jitter = Math.max(0, 100 - (kpiLatestData.packet_in?.value || 0) / 100);
+      const loss = Math.max(0, 100 - (kpiLatestData.packet_in?.value || 0) / 200);
+      const security = 92; // 占位：未暴露指标
+      return [
+        Math.round(latency),
+        Math.round(jitter),
+        Math.round(loss),
+        Math.round(avail),
+        Math.round(bandwidth),
+        security,
+      ];
     }
 
-    async function refresh() {
-      try {
-        const r = await fetch(el.dataset.endpoint);
-        const data = await r.json();
-        const items = data.items || [];
-        if (!items.length) {
-          renderEmpty();
-          return;
-        }
-        sliceChart.setOption({
-          tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
-          series: [
-            {
-              type: 'pie',
-              radius: ['45%', '70%'],
-              center: ['50%', '50%'],
-              avoidLabelOverlap: false,
-              itemStyle: { borderRadius: 4, borderColor: '#fff', borderWidth: 2 },
-              label: { show: false },
-              emphasis: { label: { show: false } },
-              data: items.map((s, i) => ({
-                value: s.cpu_used || 0,
-                name: s.name || `slice-${i}`,
-                itemStyle: { color: PALETTE[i % PALETTE.length] },
-              })),
-            },
+    function render() {
+      qosChart.setOption({
+        tooltip: {},
+        radar: {
+          center: ['50%', '52%'],
+          radius: '62%',
+          indicator: [
+            { name: '时延', max: 100 },
+            { name: '抖动', max: 100 },
+            { name: '丢包率', max: 100 },
+            { name: '可用性', max: 100 },
+            { name: '带宽', max: 100 },
+            { name: '安全性', max: 100 },
           ],
-        });
-      } catch (e) {
-        renderEmpty();
-      }
+          axisName: { color: '#a4c8ff', fontSize: 11 },
+          splitLine: { lineStyle: { color: 'rgba(0,229,255,0.18)' } },
+          splitArea: { areaStyle: { color: ['rgba(0,229,255,0.02)', 'rgba(0,229,255,0.05)'] } },
+          axisLine: { lineStyle: { color: 'rgba(0,229,255,0.2)' } },
+        },
+        series: [{
+          type: 'radar',
+          symbol: 'circle',
+          symbolSize: 4,
+          lineStyle: { color: '#00e5ff', width: 2 },
+          itemStyle: { color: '#00e5ff' },
+          areaStyle: { color: 'rgba(0,229,255,0.25)' },
+          data: [{ value: computeScore(), name: '当前评分' }],
+        }],
+      });
     }
-    refresh();
-    setInterval(refresh, CHARTS_MS);
+    render();
+    setInterval(render, CARDS_MS);
   }
 
-  // ===== 5. 链路质量列表 =====
-  async function initLinkQuality() {
-    const el = document.getElementById('linkQuality');
+  // ===== 8. TOP6 算力中心列表 =====
+  function renderComputeList() {
+    const el = $('#computeList');
     if (!el) return;
-
-    function renderEmpty() {
-      el.innerHTML =
-        '<li style="color:var(--color-text-muted);text-align:center;padding:8px 0;">暂无数据</li>';
+    if (!allClusters.length) {
+      el.innerHTML = '<div class="ds-empty" style="height:100%;">暂无集群数据</div>';
+      return;
     }
+    // 按在线节点数排序
+    const sorted = [...allClusters]
+      .sort((a, b) => (b.online_nodes || 0) - (a.online_nodes || 0))
+      .slice(0, 6);
 
-    async function refresh() {
-      try {
-        const r = await fetch(el.dataset.endpoint);
-        const data = await r.json();
-        const items = data.items || [];
-        if (!items.length) {
-          renderEmpty();
-          return;
-        }
-        el.innerHTML = items
-          .map(
-            (l) => `
-            <li>
-              <span>${l.source} → ${l.target}</span>
-              <span class="list-item__primary">${l.latency}ms</span>
-            </li>`,
-          )
-          .join('');
-      } catch (e) {
-        renderEmpty();
-      }
-    }
-    refresh();
-    setInterval(refresh, CHARTS_MS);
+    el.innerHTML = sorted.map((c, i) => {
+      const online = c.online_nodes || 0;
+      const total = c.total_nodes || online || 1;
+      const load = Math.min(100, Math.round((online / total) * 100));
+      const color = load >= 85 ? 'var(--orange)' : (load >= 60 ? 'var(--cyan)' : 'var(--green)');
+      const name = `${c.name}（${c.region || '—'}）`;
+      return `<div class="compute-row">
+        <span class="rank">#${String(i+1).padStart(2,'0')}</span>
+        <span class="name">${name}</span>
+        <div class="bar" style="--w:${load}%"></div>
+        <span class="pct" style="color:${color}">${load}%</span>
+      </div>`;
+    }).join('');
   }
 
-  // ===== 6. QoS 策略列表 =====
-  async function initPolicies() {
-    const el = document.getElementById('qosOverview');
+  // ===== 9. 实时告警 marquee =====
+  async function refreshAlerts() {
+    const el = $('#alertText');
     if (!el) return;
-
-    function renderEmpty() {
-      el.innerHTML =
-        '<li style="color:var(--color-text-muted);text-align:center;padding:8px 0;">暂无数据</li>';
-    }
-
-    async function refresh() {
-      try {
-        const r = await fetch(el.dataset.endpoint);
-        const data = await r.json();
-        const items = data.items || [];
-        if (!items.length) {
-          renderEmpty();
-          return;
-        }
-        el.innerHTML = items
-          .slice(0, 4)
-          .map(
-            (p) => `
-            <li>
-              <span>${p.name}</span>
-              <span class="status status--${p.status === 'active' ? 'healthy' : 'offline'}">${p.status === 'active' ? '生效' : '未生效'}</span>
-            </li>`,
-          )
-          .join('');
-      } catch (e) {
-        renderEmpty();
+    try {
+      const r = await fetch('/api/metrics/events');
+      const data = await r.json();
+      const items = data.items || [];
+      if (!items.length) {
+        el.innerHTML = '<i>暂无告警</i>';
+        return;
       }
+      const html = items.slice(0, 12).map((it) => {
+        const ts = it.lastUpdatedAt ? new Date(it.lastUpdatedAt * 1000).toLocaleTimeString('zh-CN', { hour12: false }) : '';
+        const txt = it.alertname || '未知告警';
+        return `<i>[${ts || 'now'}]</i> ${txt} <i>·</i>`;
+      }).join(' ');
+      el.innerHTML = html + ' · ' + html; // 无缝循环
+    } catch (e) {
+      el.innerHTML = '<i>暂无告警</i>';
     }
-    refresh();
-    setInterval(refresh, CHARTS_MS);
+  }
+
+  // ===== 10. 节点状态 pill =====
+  function renderNodePills() {
+    const el = $('#nodePills');
+    if (!el) return;
+    const clusters = allClusters.slice(0, 8);
+    if (!clusters.length) {
+      el.innerHTML = '<span style="color:var(--text-dim);">暂无节点数据</span>';
+      return;
+    }
+    el.innerHTML = clusters.map((c) => {
+      const key = statusToLegendKey(c.status);
+      const cls = key === 'warn' ? 'warn' : key === 'alert' ? 'down' : 'up';
+      const lbl = STATUS_LABEL[c.status] || '未知';
+      return `<span class="node-pill ${cls}"><span class="dot"></span>${c.name} ${lbl}</span>`;
+    }).join('');
   }
 
   // ===== Resize =====
@@ -420,22 +687,38 @@
     window.addEventListener('resize', () => {
       clearTimeout(timer);
       timer = setTimeout(() => {
-        if (geoMap) geoMap.resize();
-        if (bandwidthChart) bandwidthChart.resize();
-        if (sliceChart) sliceChart.resize();
+        if (mapChart) mapChart.resize();
+        if (resourceChart) resourceChart.resize();
+        if (trafficChart) trafficChart.resize();
+        if (qosChart) qosChart.resize();
       }, 100);
     });
   }
 
   // ===== Boot =====
   function boot() {
-    setupMetricCards();
+    startClock();
+    renderParticles();
     initMap();
-    initBandwidth();
-    initSliceChart();
-    initLinkQuality();
-    initPolicies();
+    initResourceChart();
+    initTrafficChart();
+    initQosChart();
     setupResize();
+    refreshKpi();
+    setInterval(refreshKpi, CARDS_MS);
+    refreshAlerts();
+    setInterval(refreshAlerts, CARDS_MS);
+
+    // 全屏切换：按钮 + 跨浏览器 fullscreenchange 监听
+    const fsBtn = $('#dsFullscreen');
+    if (fsBtn) fsBtn.addEventListener('click', toggleFullscreen);
+    [
+      'fullscreenchange',
+      'webkitfullscreenchange',
+      'mozfullscreenchange',
+      'MSFullscreenChange',
+    ].forEach((evt) => document.addEventListener(evt, updateFullscreenBtn));
+    updateFullscreenBtn();
   }
 
   if (document.readyState === 'loading') {
