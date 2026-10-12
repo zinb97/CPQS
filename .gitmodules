@@ -1,0 +1,3 @@
+[submodule "QoSController"]
+	path = QoSController
+	url = https://github.com/zinb97/QoSController.git
