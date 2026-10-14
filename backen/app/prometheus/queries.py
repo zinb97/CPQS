@@ -47,6 +47,8 @@ Q_EVENTS = "ALERTS"
 # collector 暴露的指标命名遵循 Prometheus node_exporter 风格：
 #   node_cpu_seconds_total{mode="..."}      CPU 各模式累计秒（全核心聚合，无 cpu 标签）
 #   node_cpu_cores                          CPU 核心数（collector 新增，替代按 cpu 标签 count）
+#   node_cpu_info{model_name,max_mhz,min_mhz,sockets,cores_per_socket,
+#                 physical_cores,threads_per_core}   CPU 型号/频率/拓扑（全 1 条 series）
 #   node_memory_MemTotal_bytes / MemAvailable_bytes / MemFree_bytes
 #   node_load1 / node_load5 / node_load15
 #   node_filesystem_size_bytes / node_filesystem_avail_bytes

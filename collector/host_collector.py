@@ -23,6 +23,21 @@ def _safe_int(value, default=0):
         return default
 
 
+def _escape_label_value(value):
+    """转义 Prometheus 标签值。
+
+    /proc/cpuinfo 的 model name 含空格与括号，未来也可能含引号或反斜杠；
+    未转义会破坏整行解析。裸 LF/CR 理论上不会出现，仍一并处理。
+    """
+    return (
+        str(value)
+        .replace('\\', '\\\\')
+        .replace('"', '\\"')
+        .replace('\n', '\\n')
+        .replace('\r', '')
+    )
+
+
 def _parse_paired_proto_stats(lines):
     """解析 /proc/net/{snmp,netstat} 的成对表头/值行格式。"""
     stats = {}
@@ -72,6 +87,7 @@ class HostCollector:
             'dmi': self._read_dmi(),
             'uname': self._read_uname(),
             'cpu_stat': self._read_cpu_stat(),
+            'cpu_info': self._read_cpu_info(),
             'loadavg': self._read_loadavg(),
             'meminfo': self._read_meminfo(),
             'snmp': self._read_snmp(),
@@ -100,17 +116,26 @@ class HostCollector:
             return []
 
     def _read_os_info(self) -> dict:
-        """读取 /etc/os-release """
+        """读取 /etc/os-release
+
+        键名统一转小写：os-release 的键天然是大写（PRETTY_NAME/ID_LIKE...），
+        而 node_exporter 的 node_os_info 用小写标签，直接透传会导致调用端
+        按 node_exporter 惯例写 PromQL 时全部匹配不到。
+        """
         info = {}
         for line in self._read_lines('/etc/os-release'):
             if '=' in line and 'URL' not in line:
                 key, value = line.split('=', 1)
                 value = value.strip('"')
-                info[key] = value
+                info[key.strip().lower()] = value
         return info
 
     def _read_dmi(self) -> dict:
-        """读取 DMI 信息"""
+        """读取 DMI 信息
+
+        /sys/class/dmi/id/ 下多数文件是 0400 root-only，非 root 运行时
+        system_vendor 常读为空；调用端应回退到 bios_vendor。
+        """
         dmi = {}
         for key in ['bios_date', 'bios_vendor', 'bios_version', 'product_name', 'system_vendor']:
             val = self._read_file(f'/sys/class/dmi/id/{key}')
@@ -175,6 +200,49 @@ class HostCollector:
                 else:
                     stats['cores'] += 1
         return stats
+
+    def _read_cpu_info(self) -> dict:
+        """读取 CPU 型号、频率上限与拓扑，供 node_cpu_info 上报。
+
+        型号与拓扑来自 /proc/cpuinfo；频率上限来自 cpufreq（kHz → MHz）。
+        cpufreq 在部分虚拟机/容器中不存在，此时仅上报型号与拓扑，不编造频率。
+        """
+        info = {}
+        sockets = set()
+        siblings = cores = 0
+
+        for line in self._read_lines('/proc/cpuinfo'):
+            if ':' not in line:
+                continue
+            key, _, value = line.partition(':')
+            key, value = key.strip(), value.strip()
+            if key == 'model name':
+                info.setdefault('model_name', value)
+            elif key == 'physical id':
+                sockets.add(value)
+            elif key == 'siblings' and not siblings:
+                siblings = _safe_int(value)
+            elif key == 'cpu cores' and not cores:
+                cores = _safe_int(value)
+
+        n_sockets = len(sockets) or 1
+        info['sockets'] = n_sockets
+        if cores:
+            info['cores_per_socket'] = cores
+            info['physical_cores'] = cores * n_sockets
+            if siblings:
+                info['threads_per_core'] = max(1, round(siblings / cores))
+
+        cpufreq = '/sys/devices/system/cpu/cpu0/cpufreq'
+        for key, filename in (
+            ('max_mhz', 'cpuinfo_max_freq'),
+            ('min_mhz', 'cpuinfo_min_freq'),
+        ):
+            raw = self._read_file(f'{cpufreq}/{filename}')
+            if raw and raw.isdigit():
+                info[key] = int(raw) // 1000
+
+        return info
 
     def _read_loadavg(self) -> dict:
         """读取 /proc/loadavg """
@@ -365,6 +433,7 @@ class HostCollector:
         self._emit_info(lines, 'os', data.get('os', {}))
         self._emit_info(lines, 'dmi', data.get('dmi', {}))
         self._emit_cpu(lines, data.get('cpu_stat', {}))
+        self._emit_cpu_info(lines, data.get('cpu_info', {}))
         self._emit_loadavg(lines, data.get('loadavg', {}))
         self._emit_memory(lines, data.get('meminfo', {}))
         self._emit_proto_flat(lines, 'node_snmp', data.get('snmp', {}))
@@ -385,7 +454,9 @@ class HostCollector:
     def _emit_info(lines, name, info):
         if not info:
             return
-        labels = ','.join(f'{k}="{v}"' for k, v in info.items())
+        labels = ','.join(
+            f'{k}="{_escape_label_value(v)}"' for k, v in info.items()
+        )
         lines.append(f'node_{name}_info{{{labels}}} 1')
 
     @staticmethod
@@ -403,6 +474,15 @@ class HostCollector:
             value = cpu_stat.get(key)
             if isinstance(value, (int, float)):
                 lines.append(f'{metric_name} {value}')
+
+    @staticmethod
+    def _emit_cpu_info(lines, info):
+        if not info:
+            return
+        labels = ','.join(
+            f'{k}="{_escape_label_value(v)}"' for k, v in info.items()
+        )
+        lines.append(f'node_cpu_info{{{labels}}} 1')
 
     @staticmethod
     def _emit_loadavg(lines, loadavg):

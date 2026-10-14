@@ -121,6 +121,28 @@ async def _safe_query(request: Request, promql: str) -> list[dict[str, Any]]:
         return []
 
 
+async def _resolve_instance(request: Request, instance: str) -> str:
+    """把 URL 里的裸主机名/IP 补全成 Prometheus 的 instance 标签。
+
+    页面 URL 用裸 IP 更干净（/resource/hosts/192.168.10.31），但 scrape config
+    产生的 instance 标签带端口（192.168.10.31:9100），PromQL 必须匹配完整标签。
+
+    带端口的入参直接透传；裸 IP 走 `/api/v1/targets` 反查，多个端口命中时取第一个。
+    查不到就原样返回，让查询自然返回空、前端走「主机不存在」空状态。
+    """
+    if not instance or ":" in instance:
+        return instance
+    try:
+        targets = await _client(request).targets()
+    except Exception:
+        return instance
+    for t in targets:
+        inst = (t.get("labels") or {}).get("instance") or ""
+        if inst.rsplit(":", 1)[0] == instance:
+            return inst
+    return instance
+
+
 def _summarize_targets(targets: list[dict[str, Any]]) -> tuple[int, int, int]:
     """从 `/api/v1/targets` 结果推导 (集群数, 总节点数, 在线节点数)。
 
@@ -622,6 +644,7 @@ async def host_timeseries(instance: str, request: Request, window: str = "30m") 
     """
     span, step = _WINDOW_PRESETS.get(window, _WINDOW_PRESETS["30m"])
     cli = _client(request)
+    instance = await _resolve_instance(request, instance)
     end = datetime.now()
     start = end - span
 
@@ -718,6 +741,19 @@ async def host_detail(instance: str, request: Request) -> JSONResponse:
     cluster_meta: dict[str, dict[str, Any]] = request.app.state.cluster_meta
     node_targets = await _list_node_targets(request)
 
+    # URL 传的是裸 IP（/resource/hosts/192.168.10.31），instance 标签带端口，
+    # 这里复用已取到的 targets 列表补全，不额外发请求。
+    if instance and ":" not in instance:
+        instance = next(
+            (
+                (t.get("labels") or {}).get("instance")
+                for t in node_targets
+                if ((t.get("labels") or {}).get("instance") or "").rsplit(":", 1)[0]
+                == instance
+            ),
+            instance,
+        )
+
     target = next(
         (
             t for t in node_targets
@@ -732,15 +768,16 @@ async def host_detail(instance: str, request: Request) -> JSONResponse:
     cid = labels.get("cluster", "")
     cluster = cluster_meta.get(cid, {})
 
-    # 并发查询：8 类指标 + 3 个元指标 + 4 个 GPU 指标
+    # 并发查询：8 类指标 + 4 个元指标 + 4 个 GPU 指标
     (
-        cpu, cpu_cores, load1, mem_total, mem_avail, max_temp, procs,
+        cpu, cpu_cores, cpu_info, load1, mem_total, mem_avail, max_temp, procs,
         boot_time, disk_io, disk_size, net_rx, net_tx,
         uname_info, os_info, dmi_info,
         gpu_count, gpu_util, gpu_temp, gpu_mem_used,
     ) = await asyncio.gather(
         _safe_query(request, q_node_cpu_usage(instance)),
         _safe_query(request, q_node_cpu_cores(instance)),
+        _safe_query(request, f'node_cpu_info{{instance="{instance}"}}'),
         _safe_query(request, q_node_load1(instance)),
         _safe_query(request, q_node_mem_total(instance)),
         _safe_query(request, q_node_mem_avail(instance)),
@@ -765,11 +802,16 @@ async def host_detail(instance: str, request: Request) -> JSONResponse:
         return _scalar(r) if isinstance(r, list) else None
 
     def _info(r) -> dict[str, str]:
+        """从 *_info 元指标取标签，只保留采集器自己上报的字段。
+
+        `__name__/instance/job/cluster/location` 由 Prometheus scrape config
+        注入或属于指标本身，不属于设备信息，统一剔除。
+        """
         if not isinstance(r, list) or not r:
             return {}
         out: dict[str, str] = {}
         for k, v in (r[0].get("metric") or {}).items():
-            if k in ("__name__", "instance", "job", "cluster"):
+            if k in ("__name__", "instance", "job", "cluster", "location"):
                 continue
             out[k] = str(v)
         return out
@@ -811,6 +853,7 @@ async def host_detail(instance: str, request: Request) -> JSONResponse:
         "gpu_mem_used_mib": _round(_q(gpu_mem_used), 0),
 
         # 系统信息
+        "cpu_info": _info(cpu_info),
         "uname": _info(uname_info),
         "os": _info(os_info),
         "dmi": _info(dmi_info),

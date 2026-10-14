@@ -117,6 +117,10 @@
     <div class="panel">
       <div class="panel__title">系统硬件</div>
       <dl class="host-info" id="hostSystem">
+        <div><dt>CPU 型号</dt><dd id="iCpuModel">—</dd></div>
+        <div><dt>CPU 频率</dt><dd id="iCpuFreq">—</dd></div>
+        <div><dt>CPU 拓扑</dt><dd id="iCpuTopo">—</dd></div>
+        <div><dt>物理核心</dt><dd id="iCpuPhysical">—</dd></div>
         <div><dt>操作系统</dt><dd id="iPrettyName">—</dd></div>
         <div><dt>内核版本</dt><dd id="iKernel">—</dd></div>
         <div><dt>架构</dt><dd id="iArch">—</dd></div>
@@ -249,7 +253,8 @@
 {% block extra_scripts %}
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js" crossorigin="anonymous"></script>
 <script>
-  const INSTANCE = {{ instance | tojson }};
+  // URL 里是裸 IP（可能仍带 :port 的旧链接），统一去掉端口后再比对和拼 URL。
+  const INSTANCE = {{ instance | tojson }}.replace(/:\d+$/, '');
   const STATUS_LABEL = { healthy: '运行中', warning: '部分离线', offline: '离线', unknown: '未知' };
   const STATUS_CLASS = { healthy: 'status--healthy', warning: 'status--warning', offline: 'status--offline', unknown: 'status--offline' };
 
@@ -469,7 +474,7 @@
     const opts = [];
     (clusterHosts || []).forEach((h) => {
       const label = (h.instance || '').replace(/:\d+$/, '');
-      const selAttr = h.instance === INSTANCE ? ' selected' : '';
+      const selAttr = label === INSTANCE ? ' selected' : '';
       const offlineTag = h.health === 'up' ? '' : ' （离线）';
       opts.push(`<option value="${h.instance}"${selAttr}>${label}${offlineTag}</option>`);
     });
@@ -477,7 +482,12 @@
   }
 
   function renderDetail(d) {
-    document.getElementById('hostTitle').textContent = (d.instance || '').replace(/:\d+$/, '');
+    // 标题按「主机名（IP）」展示。nodename 来自 platform.uname()，容器里可能是
+    // 随机 ID，与 IP 相同时也无额外信息量，两种情况都退化为只显示 IP。
+    const hostIp = (d.instance || '').replace(/:\d+$/, '');
+    const hostName = (d.uname && d.uname.nodename) || '';
+    document.getElementById('hostTitle').textContent =
+      (hostName && hostName !== hostIp) ? `${hostName}（${hostIp}）` : hostIp;
     setText('mGpuCount', d.gpu_count > 0 ? d.gpu_count + ' 卡' : '—');
     setText('mCpuCores', d.cpu_cores != null ? d.cpu_cores + ' 核' : '—');
     setText('mMemTot', fmtBytes(d.mem_total_bytes));
@@ -506,12 +516,24 @@
     const u = d.uname || {};
     const o = d.os || {};
     const m = d.dmi || {};
-    setText('iPrettyName', o.pretty_name || o.name || '—');
+    setText('iPrettyName', o.pretty_name || o.PRETTY_NAME || o.name || o.NAME || '—');
     setText('iKernel', u.release || '—');
     setText('iArch', u.machine || '—');
     setText('iProduct', m.product_name || '—');
-    setText('iVendor', m.system_vendor || '—');
+    // system_vendor 在 /sys/class/dmi/id/ 下是 root-only，非 root 采集时读不到，
+    // 回退到同样含厂商信息的 bios_vendor。
+    setText('iVendor', m.system_vendor || m.bios_vendor || '—');
     setText('iBios', m.bios_version || '—');
+
+    const ci = d.cpu_info || {};
+    setText('iCpuModel', ci.model_name || '—');
+    setText('iCpuFreq',
+      (ci.min_mhz && ci.max_mhz) ? `${ci.min_mhz} ~ ${ci.max_mhz} MHz` : '—');
+    setText('iCpuTopo',
+      (ci.sockets && ci.cores_per_socket)
+        ? `${ci.sockets} 插槽 × ${ci.cores_per_socket} 核 × ${ci.threads_per_core || 1} 线程`
+        : '—');
+    setText('iCpuPhysical', ci.physical_cores != null ? `${ci.physical_cores} 核` : '—');
 
     const status = d.health || 'unknown';
     const badge = document.getElementById('hostStatus');
@@ -566,7 +588,8 @@
 
   // 主机切换：跳转到新主机的详情页（让服务端重新渲染模板最简单）
   document.getElementById('hostSelect').addEventListener('change', (e) => {
-    const v = e.target.value;
+    // URL 用裸 IP，后端按 /api/v1/targets 补全成带端口的 instance 标签
+    const v = (e.target.value || '').replace(/:\d+$/, '');
     if (v && v !== INSTANCE) {
       location.href = '/resource/hosts/' + encodeURIComponent(v);
     }
