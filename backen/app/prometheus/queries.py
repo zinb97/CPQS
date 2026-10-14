@@ -10,12 +10,12 @@ import yaml
 # ===== Dashboard 9 个指标卡 =====
 # 集群数 / 总节点数 / 在线节点数 由 `/api/v1/targets` 推导（PrometheusClient.targets），
 # 不再用 PromQL（up{job=~"node-.*"} 系列）。
-Q_CPU_CORES = "count(node_cpu_seconds_total{mode='system'})"
+Q_CPU_CORES = "sum(node_cpu_cores)"
 Q_MEMORY_TOTAL = "sum(node_memory_MemTotal_bytes{})"
 Q_SWITCHES = "qos_switches_count"
 Q_LINKS = "qos_links_count"
 Q_HOSTS = "qos_hosts_count"
-Q_PACKET_IN = "SUM(qos_switch_packet_in_total)"
+Q_PACKET_IN = "sum(qos_switch_packet_in_total)"
 
 
 # ===== 地图数据 =====
@@ -27,23 +27,26 @@ Q_CLUSTERS_USED_FLOPS = "sum by(cluster) (qos_cluster_used_flops)"
 
 
 # ===== 带宽趋势（24h，5m 步进）=====
-Q_BANDWIDTH_RANGE = "sum(rate(node_network_transmit_bytes_total[5m]))"
+# 源指标为 bytes/s：×8 转 bits/s、÷1e6 转 Mbps，与 dashboard 的 Mbps 口径一致。
+Q_BANDWIDTH_RANGE = "sum(rate(node_network_transmit_bytes_total[5m])) * 8 / 1000000"
 Q_LATENCY_RANGE = "qos_link_latency_ms"
 
 
-# ===== 兜底 PromQL：UI 已有但 PromQL 不确定 =====
-# 切片 / QoS 策略 / 链路 / 事件 — 这些在原 mock 中均为硬编码，
-# 新版用空状态展示（dashboard.html 与 dashboard.js 已支持）。
-# 待真实 exporter 暴露指标后在此补全 PromQL 即可生效。
-Q_SLICES = "sum by(slice) (qos_slice_cpu_used)"
-Q_LINKS_QUALITY = "qos_link_quality"
-Q_POLICIES = "qos_policy_info"
+# ===== 网络链路质量 =====
+# 由 QoSController 的 /metrics 暴露，链路双向各上报一条 series。
+# 注意标签名是 src_dpid/dst_dpid，不是 source/target。
+Q_LINKS_QUALITY = "qos_link_delay_ms"
+Q_LINKS_LOSS = "qos_link_loss_percent"
+
+
+# ===== 告警事件 =====
 Q_EVENTS = "ALERTS"
 
 
 # ===== 资源管控中心页面 PromQL 模板 =====
 # collector 暴露的指标命名遵循 Prometheus node_exporter 风格：
-#   node_cpu_seconds_total{mode="..."}      CPU 各模式累计秒
+#   node_cpu_seconds_total{mode="..."}      CPU 各模式累计秒（全核心聚合，无 cpu 标签）
+#   node_cpu_cores                          CPU 核心数（collector 新增，替代按 cpu 标签 count）
 #   node_memory_MemTotal_bytes / MemAvailable_bytes / MemFree_bytes
 #   node_load1 / node_load5 / node_load15
 #   node_filesystem_size_bytes / node_filesystem_avail_bytes
@@ -57,10 +60,18 @@ Q_EVENTS = "ALERTS"
 
 
 def q_cluster_cpu_usage(cluster_id: str) -> str:
-    """集群 CPU 平均使用率（1m 窗口）。
+    """集群 CPU 平均使用率（1m 窗口，0~1）。
+
+    `node_cpu_seconds_total` 是全核心累加值，idle 的 rate 取值域为 [0, 核心数]，
+    必须除以 node_cpu_cores 归一化回 [0,1] 后再做 1-x。
+    除法两侧标签集不同：rate() 只去掉 __name__，仍保留 mode 标签，
+    而 node_cpu_cores 没有 mode，所以必须写 ignoring(mode) 否则匹配为空。
     """
     return (
-        f'avg by(cluster) (1 - avg by(instance) (avg by(cpu, instance) (rate(node_cpu_seconds_total{{cluster="{cluster_id}",mode="idle",cpu!=""}}[1m]))))'
+        f'avg by(cluster) (1 - ('
+        f'rate(node_cpu_seconds_total{{cluster="{cluster_id}",mode="idle"}}[1m])'
+        f' / ignoring(mode) node_cpu_cores{{cluster="{cluster_id}"}}'
+        f'))'
     )
 
 def q_cluster_mem_usage(cluster_id: str) -> str:
@@ -79,10 +90,7 @@ def q_cluster_load(cluster_id: str) -> str:
 
 def q_cluster_cpu_cores(cluster_id: str) -> str:
     """集群 CPU 核心总数（各节点 cores 之和）。"""
-    return (
-        f'count by(cluster) '
-        f'(node_cpu_seconds_total{{cluster="{cluster_id}",mode="system",cpu!=""}})'
-    )
+    return f'sum by(cluster) (node_cpu_cores{{cluster="{cluster_id}"}})'
 
 
 def q_cluster_mem_total(cluster_id: str) -> str:
@@ -96,10 +104,8 @@ def q_cluster_max_temp(cluster_id: str) -> str:
 
 
 def q_node_cpu_cores(instance: str) -> str:
-    """单节点 CPU 核心数（系统模式 series 数）。"""
-    return (
-        f'count(node_cpu_seconds_total{{instance="{instance}",mode="system",cpu!=""}})'
-    )
+    """单节点 CPU 核心数。"""
+    return f'node_cpu_cores{{instance="{instance}"}}'
 
 
 def q_node_disk_size(instance: str) -> str:
@@ -110,15 +116,21 @@ def q_node_disk_size(instance: str) -> str:
 
 
 def q_node_cpu_usage(instance: str) -> str:
-    """单节点 CPU 平均使用率（1m 窗口，跨所有核）。
+    """单节点 CPU 平均使用率（1m 窗口，0~1）。
 
     标准 CPU 利用率公式：CPU% = 1 - idle%。iowait 不应单独扣除——
     iowait 表示 CPU 在等待 I/O 完成，但仍然消耗了 CPU 时间片，应算作"忙碌"。
     这与 `top` / `node_exporter` 的算法一致。
+
+    `node_cpu_seconds_total` 已聚合全部核心，idle 的 rate 取值域是 [0, 核心数]，
+    需除以 node_cpu_cores 归一化，否则 1 - rate 会得到负值。
+    ignoring(mode) 不可省：rate() 保留 mode 标签，两侧标签集需显式忽略后匹配。
     """
     return (
-        f'1 - avg by(instance) '
-        f'(rate(node_cpu_seconds_total{{instance="{instance}",mode="idle",cpu!=""}}[1m]))'
+        f'1 - ('
+        f'rate(node_cpu_seconds_total{{instance="{instance}",mode="idle"}}[1m])'
+        f' / ignoring(mode) node_cpu_cores{{instance="{instance}"}}'
+        f')'
     )
 
 def q_node_load1(instance: str) -> str:

@@ -663,10 +663,20 @@
         el.innerHTML = '<i>暂无告警</i>';
         return;
       }
-      const html = items.slice(0, 12).map((it) => {
-        const ts = it.lastUpdatedAt ? new Date(it.lastUpdatedAt * 1000).toLocaleTimeString('zh-CN', { hour12: false }) : '';
-        const txt = it.alertname || '未知告警';
-        return `<i>[${ts || 'now'}]</i> ${txt} <i>·</i>`;
+      // firing 优先占据展示位，resolved 降级排后并标注，避免已恢复告警与触发中混淆
+      const sorted = [...items].sort(
+        (a, b) => (a.state === 'firing' ? 0 : 1) - (b.state === 'firing' ? 0 : 1)
+      );
+      const html = sorted.slice(0, 12).map((it) => {
+        const ts = it.lastUpdatedAt
+          ? new Date(it.lastUpdatedAt * 1000).toLocaleTimeString('zh-CN', { hour12: false })
+          : '—';
+        const name = it.alertname || '未知告警';
+        const sev = it.severity ? `<i>[${it.severity}]</i> ` : '';
+        const tag = it.state === 'firing'
+          ? '<i style="color:#ff5577">● 触发</i>'
+          : '<i style="opacity:.5">○ 已恢复</i>';
+        return `${tag} ${sev}${name} <i>[${ts}]</i> <i>·</i>`;
       }).join(' ');
       el.innerHTML = html + ' · ' + html; // 无缝循环
     } catch (e) {

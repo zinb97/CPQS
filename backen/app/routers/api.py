@@ -21,11 +21,10 @@ from app.prometheus.queries import (
     Q_EVENTS,
     Q_HOSTS,
     Q_LINKS,
+    Q_LINKS_LOSS,
     Q_LINKS_QUALITY,
     Q_MEMORY_TOTAL,
     Q_PACKET_IN,
-    Q_POLICIES,
-    Q_SLICES,
     Q_SWITCHES,
     q_cluster_cpu_cores,
     q_cluster_cpu_usage,
@@ -243,6 +242,7 @@ async def map_data(request: Request) -> JSONResponse:
         targets = []
 
     online_by_cluster: dict[str, int] = {}
+    total_by_cluster: dict[str, int] = {}
     cluster_ids: set[str] = set()
     for t in targets:
         labels = t.get("labels") or {}
@@ -252,6 +252,7 @@ async def map_data(request: Request) -> JSONResponse:
         if not cid:
             continue
         cluster_ids.add(cid)
+        total_by_cluster[cid] = total_by_cluster.get(cid, 0) + 1
         if t.get("health") == "up":
             online_by_cluster[cid] = online_by_cluster.get(cid, 0) + 1
 
@@ -260,7 +261,13 @@ async def map_data(request: Request) -> JSONResponse:
     for cid in cluster_ids:
         meta = cluster_meta.get(cid, {})
         online = online_by_cluster.get(cid, 0)
-        status = "healthy" if online > 0 else "offline"
+        total = total_by_cluster.get(cid, 0)
+        if total == 0 or online == 0:
+            status = "offline"
+        elif online == total:
+            status = "healthy"
+        else:
+            status = "warning"
         clusters.append({
             "id": cid,
             "name": meta.get("name", cid),
@@ -268,6 +275,7 @@ async def map_data(request: Request) -> JSONResponse:
             "province": meta.get("province", ""),
             "location": meta.get("location", [0, 0]),
             "online_nodes": online,
+            "total_nodes": total,
             "status": status,
         })
 
@@ -281,6 +289,7 @@ async def map_data(request: Request) -> JSONResponse:
                 "province": meta.get("province", ""),
                 "location": meta.get("location", [0, 0]),
                 "online_nodes": 0,
+                "total_nodes": 0,
                 "status": "unknown",
             })
 
@@ -290,70 +299,64 @@ async def map_data(request: Request) -> JSONResponse:
     )
 
 
-@router.get("/slices")
-async def slices(request: Request) -> JSONResponse:
-    """网络切片占用数据。PromQL 不确定时返回空列表，前端显示空状态。"""
-    results = await _safe_query(request, Q_SLICES)
-    items: list[dict[str, Any]] = []
-    for r in results:
-        labels = r.get("metric", {})
-        try:
-            used = float(r["value"][1])
-        except (KeyError, ValueError, TypeError):
-            continue
-        items.append({
-            "name": labels.get("slice", labels.get("name", "unknown")),
-            "cpu_used": int(used),
-        })
-    return cache_response({"items": items}, max_age=request.app.state.settings.charts_cache_s)
-
-
 @router.get("/links")
 async def links_quality(request: Request) -> JSONResponse:
-    """链路质量列表（延迟 / 丢包率）。"""
-    results = await _safe_query(request, Q_LINKS_QUALITY)
-    items: list[dict[str, Any]] = []
-    for r in results:
-        labels = r.get("metric", {})
-        try:
-            value = float(r["value"][1])
-        except (KeyError, ValueError, TypeError):
-            continue
-        items.append({
-            "source": labels.get("source", ""),
-            "target": labels.get("target", ""),
-            "latency": value,
-        })
-    return cache_response({"items": items}, max_age=request.app.state.settings.charts_cache_s)
+    """链路质量列表（延迟 / 丢包率）。
 
+    数据源为 QoSController 暴露的 `qos_link_delay_ms` 与 `qos_link_loss_percent`，
+    两者是独立 series，按 (src_dpid, dst_dpid) 合并为一条链路记录。
+    双向链路会各自上报一条，此处保持原样不去重。
+    """
+    delay_results, loss_results = await asyncio.gather(
+        _safe_query(request, Q_LINKS_QUALITY),
+        _safe_query(request, Q_LINKS_LOSS),
+    )
 
-@router.get("/policies")
-async def policies(request: Request) -> JSONResponse:
-    """QoS 策略列表。"""
-    results = await _safe_query(request, Q_POLICIES)
-    items: list[dict[str, Any]] = []
-    for r in results:
-        labels = r.get("metric", {})
-        items.append({
-            "name": labels.get("name", "unknown"),
-            "type": labels.get("type", ""),
-            "priority": labels.get("priority", ""),
-            "status": labels.get("status", "active"),
-        })
-    return cache_response({"items": items}, max_age=request.app.state.settings.charts_cache_s)
+    links: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def _collect(results: list[dict[str, Any]], field: str) -> None:
+        for r in results:
+            labels = r.get("metric", {})
+            src, dst = labels.get("src_dpid", ""), labels.get("dst_dpid", "")
+            if not src or not dst:
+                continue
+            try:
+                value = round(float(r["value"][1]), 2)
+            except (KeyError, ValueError, TypeError, IndexError):
+                continue
+            links.setdefault(
+                (src, dst),
+                {"source": src, "target": dst, "latency": None, "loss": None},
+            )[field] = value
+
+    _collect(delay_results, "latency")
+    _collect(loss_results, "loss")
+
+    return cache_response(
+        {"items": list(links.values())},
+        max_age=request.app.state.settings.charts_cache_s,
+    )
 
 
 @router.get("/events")
 async def events(request: Request) -> JSONResponse:
-    """实时事件流（Prometheus ALERTS 兜底，Prometheus 非事件型系统）。"""
+    """实时事件流（Prometheus ALERTS 兜底，Prometheus 非事件型系统）。
+
+    `lastUpdatedAt` 取自 sample 时间戳（Unix 秒），供前端渲染发生时刻。
+    """
     results = await _safe_query(request, Q_EVENTS)
     items: list[dict[str, Any]] = []
     for r in results:
         labels = r.get("metric", {})
+        try:
+            updated_at = float(r["value"][0])
+        except (KeyError, ValueError, TypeError, IndexError):
+            updated_at = None
         items.append({
             "alertname": labels.get("alertname", ""),
             "state": labels.get("alertstate", ""),
             "severity": labels.get("severity", ""),
+            "lastUpdatedAt": updated_at,
         })
     return cache_response({"items": items}, max_age=request.app.state.settings.cards_cache_s)
 

@@ -61,21 +61,17 @@ class HostCollector:
     def __init__(self):
         self._data = {}  # 所有采集的原始数据
 
-    def collect(self, per_cpu=True) -> dict:
-        self._collect_all(per_cpu=per_cpu)
+    def collect(self) -> dict:
+        self._collect_all()
         return self._data
 
-    def _collect_all(self, per_cpu=False):
-        """一次性采集所有原始数据
-
-        Args:
-            per_cpu: 是否读取每个 CPU 核心的详细数据，默认只读总计数据
-        """
+    def _collect_all(self):
+        """一次性采集所有原始数据"""
         self._data = {
             'os': self._read_os_info(),
             'dmi': self._read_dmi(),
             'uname': self._read_uname(),
-            'cpu_stat': self._read_cpu_stat(per_cpu=per_cpu),
+            'cpu_stat': self._read_cpu_stat(),
             'loadavg': self._read_loadavg(),
             'meminfo': self._read_meminfo(),
             'snmp': self._read_snmp(),
@@ -137,30 +133,29 @@ class HostCollector:
         except:
             return {}
 
-    def _read_cpu_stat(self, per_cpu=False) -> dict:
+    def _read_cpu_stat(self) -> dict:
         """读取 /proc/stat
 
-        Args:
-            per_cpu: 是否读取每个 CPU 核心的详细数据，默认只读总计数据
+        只保留 `cpu` 汇总行；`cpuN` 单核行仅用于统计核心数，不存储其明细。
         """
-        stats = {}
+        stats: dict = {'cores': 0}
         for line in self._read_lines('/proc/stat'):
             fields = line.split()
             if not fields:
                 continue
 
-            # 总计行：cpu 或 特定统计行
-            if fields[0] == 'ctxt':
+            name = fields[0]
+            if name == 'ctxt':
                 stats['ctxt'] = int(fields[1])
-            elif fields[0] == 'btime':
+            elif name == 'btime':
                 stats['btime'] = int(fields[1])
-            elif fields[0] == 'processes':
+            elif name == 'processes':
                 stats['processes'] = int(fields[1])
-            elif fields[0] == 'procs_running':
+            elif name == 'procs_running':
                 stats['procs_running'] = int(fields[1])
-            elif fields[0] == 'procs_blocked':
+            elif name == 'procs_blocked':
                 stats['procs_blocked'] = int(fields[1])
-            elif fields[0] == 'softirq':
+            elif name == 'softirq':
                 stats['softirq'] = {
                     'total': int(fields[1]),
                     'hi': int(fields[2]),
@@ -170,21 +165,15 @@ class HostCollector:
                     ' sched': int(fields[6]),
                     'rcu': int(fields[7]) if len(fields) > 7 else 0,
                 }
-            elif fields[0].startswith('cpu') and len(fields) >= 8:
-                cpu = fields[0]
-                if per_cpu or cpu == 'cpu':
-                    stats[cpu] = {
-                        'user': int(fields[1]) / 100,
-                        'nice': int(fields[2]) / 100,
-                        'system': int(fields[3]) / 100,
-                        'idle': int(fields[4]) / 100,
-                        'iowait': int(fields[5]) / 100,
-                        'irq': int(fields[6]) / 100,
-                        'softirq': int(fields[7]) / 100,
-                        'steal': int(fields[8]) / 100 if len(fields) > 8 else 0,
+            elif name.startswith('cpu') and len(fields) >= 4:
+                if name == 'cpu':
+                    # 字段顺序与 _CPU_MODES 一致，缺失的尾部 mode（steal 等）按 0 处理
+                    stats['cpu'] = {
+                        mode: int(fields[i + 1]) / 100 if i + 1 < len(fields) else 0
+                        for i, mode in enumerate(_CPU_MODES)
                     }
-
-        # 合并总计数据
+                else:
+                    stats['cores'] += 1
         return stats
 
     def _read_loadavg(self) -> dict:
@@ -368,18 +357,14 @@ class HostCollector:
         """输出为 JSON 格式"""
         return json.dumps(self.collect(), indent=4, ensure_ascii=False)
 
-    def to_prometheus(self, per_cpu=True) -> str:
-        """输出为 Prometheus 文本格式
-
-        Args:
-            per_cpu: 是否包含每个 CPU 核心的详细数据
-        """
-        data = self.collect(per_cpu=per_cpu)
+    def to_prometheus(self) -> str:
+        """输出为 Prometheus 文本格式"""
+        data = self.collect()
         lines = []
         self._emit_info(lines, 'uname', data.get('uname', {}))
         self._emit_info(lines, 'os', data.get('os', {}))
         self._emit_info(lines, 'dmi', data.get('dmi', {}))
-        self._emit_cpu(lines, data.get('cpu_stat', {}), per_cpu)
+        self._emit_cpu(lines, data.get('cpu_stat', {}))
         self._emit_loadavg(lines, data.get('loadavg', {}))
         self._emit_memory(lines, data.get('meminfo', {}))
         self._emit_proto_flat(lines, 'node_snmp', data.get('snmp', {}))
@@ -404,23 +389,20 @@ class HostCollector:
         lines.append(f'node_{name}_info{{{labels}}} 1')
 
     @staticmethod
-    def _emit_cpu(lines, cpu_stat, per_cpu):
-        for cpu, vals in cpu_stat.items():
-            if isinstance(vals, dict) and 'user' in vals:
-                if cpu == 'cpu':
-                    cpu_label = ''
-                elif per_cpu and cpu.startswith('cpu'):
-                    cpu_label = f'cpu="{cpu[3:]}",'
-                else:
-                    continue
-                for mode in _CPU_MODES:
-                    lines.append(
-                        f'node_cpu_seconds_total{{{cpu_label}mode="{mode}"}} {vals.get(mode, 0)}'
-                    )
-            elif isinstance(vals, (int, float)):
-                metric_name = _CPU_STAT_SCALARS.get(cpu)
-                if metric_name:
-                    lines.append(f'{metric_name} {vals}')
+    def _emit_cpu(lines, cpu_stat):
+        cores = cpu_stat.get('cores')
+        if cores:
+            lines.append(f'node_cpu_cores {cores}')
+
+        cpu = cpu_stat.get('cpu')
+        if cpu:
+            for mode in _CPU_MODES:
+                lines.append(f'node_cpu_seconds_total{{mode="{mode}"}} {cpu.get(mode, 0)}')
+
+        for key, metric_name in _CPU_STAT_SCALARS.items():
+            value = cpu_stat.get(key)
+            if isinstance(value, (int, float)):
+                lines.append(f'{metric_name} {value}')
 
     @staticmethod
     def _emit_loadavg(lines, loadavg):
@@ -498,9 +480,11 @@ class HostCollector:
 if __name__ == '__main__':
     pass
     collector = HostCollector()
+    collector.collect()
+    print(collector._data.get('cpu_stat'))
     # print(collector._read_netstat())
     # print(json.dumps(collector._read_sockstat(), indent=4, ensure_ascii=False))
 
     # s = collector.to_json()
-    print(collector.to_prometheus())
+    # print(collector.to_prometheus())
     # # print(s)
