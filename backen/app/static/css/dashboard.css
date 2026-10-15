@@ -540,7 +540,8 @@
 }
 .dashboard-screen .compute-row {
   display: grid;
-  grid-template-columns: 50px 1fr 70px 50px;
+  /* 末列放算力数值（最宽 "128.60 PFLOPS"），不是百分比 */
+  grid-template-columns: 50px 1fr 70px 96px;
   align-items: center;
   gap: 10px;
   padding: 6px 8px;
@@ -553,13 +554,6 @@
   font-weight: 700;
 }
 .dashboard-screen .compute-row .name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 名称后的算力规模标注：同行次要信息，不另起一行以免行高跳变 */
-.dashboard-screen .compute-row .name .sub {
-  margin-left: 8px;
-  font-size: 11px;
-  color: var(--text-dim);
-  font-family: "Consolas", monospace;
-}
 .dashboard-screen .compute-row .bar {
   height: 6px;
   background: rgba(0, 229, 255, 0.1);

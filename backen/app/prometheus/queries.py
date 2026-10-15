@@ -266,24 +266,6 @@ def q_cluster_gpu_flops_peak(precision: str) -> str:
     return f'sum by(cluster) (node_gpu_flops_peak{{precision="{precision}"}})'
 
 
-def q_cpu_usage_by_cluster() -> str:
-    """全部集群的 CPU 使用率（0~1），一次 `by(cluster)` 拿完。
-
-    与 `q_cluster_cpu_usage` 同式，只是不带 cluster 过滤，供大屏地图用。
-    """
-    return (
-        'avg by(cluster) (1 - ('
-        'rate(node_cpu_seconds_total{mode="idle"}[1m])'
-        ' / ignoring(mode) node_cpu_cores'
-        '))'
-    )
-
-
-def q_gpu_util_by_cluster() -> str:
-    """全部集群的 GPU 平均利用率（0~100 百分数）。"""
-    return "avg by(cluster) (DCGM_FI_DEV_GPU_UTIL)"
-
-
 def load_cluster_locations(path: str | Path) -> dict[str, dict[str, Any]]:
     """加载集群元数据 → {cluster_id: {name, region, location, ...}}。
 

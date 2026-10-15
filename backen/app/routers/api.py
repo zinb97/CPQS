@@ -38,8 +38,6 @@ from app.prometheus.queries import (
     q_cluster_max_temp,
     q_cluster_mem_total,
     q_cluster_mem_usage,
-    q_cpu_usage_by_cluster,
-    q_gpu_util_by_cluster,
     q_node_boot_time,
     q_node_cpu_cores,
     q_node_cpu_flops_peak,
@@ -68,7 +66,6 @@ router = APIRouter(prefix="/api/metrics")
 # ===== Helpers =====
 
 BYTES_PER_TB = 1024 ** 4
-FLOPS_PER_PETA = 1e15
 
 
 def _flops_map(*pairs: tuple[list[dict[str, Any]], str] | None) -> dict[str, float]:
@@ -98,32 +95,6 @@ def _sum_flops(maps: list[dict[str, float]]) -> dict[str, float]:
     return out
 
 
-def _used_flops(
-    cpu_peak: dict[str, float],
-    gpu_peak: dict[str, float],
-    cpu_ratio: float | None,
-    gpu_percent: float | None,
-) -> dict[str, float]:
-    """已用算力 = CPU 峰值 × CPU 使用率 + GPU 峰值 × GPU 利用率。
-
-    `cpu_ratio` 是 0~1 的比例（q_cluster_cpu_usage / q_node_cpu_usage 的口径）；
-    `gpu_percent` 是 0~100 的百分数（DCGM_FI_DEV_GPU_UTIL 的口径），
-    这里统一除 100 换算——两个量纲不同，漏了会让 GPU 已用算力放大 100 倍。
-
-    fp16 只来自 GPU（Tensor Core 口径），乘上 GPU 向量单元的利用率并不成立，
-    因此 fp16 不参与「已用」计算，只报峰值。
-    """
-    gpu_ratio = gpu_percent / 100.0 if gpu_percent is not None else None
-    out: dict[str, float] = {}
-    for precision, peak in cpu_peak.items():
-        value = peak * cpu_ratio if cpu_ratio else 0.0
-        if gpu_ratio and (gpu_p := gpu_peak.get(precision)) and precision != "fp16":
-            value += gpu_p * gpu_ratio
-        if value:
-            out[precision] = value
-    return out
-
-
 def _scalar(result: list[dict[str, Any]]) -> float | None:
     """取第一条结果的数值。空列表或解析失败返回 None。"""
     if not result:
@@ -141,12 +112,22 @@ def metric_card(value: float | None, unit: str) -> dict[str, Any]:
         return {"value": None, "unit": unit}
     if unit == "TB":
         return {"value": round(value / BYTES_PER_TB, 1), "unit": unit}
-    if unit == "PFLOPS":
-        # PF 起跳后 2 位小数只有 0.01 PF = 10 TF 的分辨率，单机规模的集群会被
-        # 抹成 0.01，自适应降位到 PF 时给 4 位、否则 2 位。
-        pf = value / FLOPS_PER_PETA
-        return {"value": round(pf, 4 if pf < 1 else 2), "unit": unit}
+    if unit == "FLOPS":
+        return _auto_flops(value)
     return {"value": int(value), "unit": unit}
+
+
+def _auto_flops(value: float) -> dict[str, Any]:
+    """按量级自适应单位，保证数值落在 [1, 1000) 区间。
+
+    单位写死成 PFLOPS 时，单机规模的集群（FP64 约 1.6 TF）会显示成 0.0016
+    PFLOPS —— 既读不出数，也无法和别的卡横向比较。算力跨度能从单机到万卡集群，
+    固定任何一种单位都会在一端崩掉，所以单位跟着数值走。
+    """
+    for unit, scale in (("EFLOPS", 1e18), ("PFLOPS", 1e15), ("TFLOPS", 1e12)):
+        if value >= scale:
+            return {"value": round(value / scale, 2), "unit": unit}
+    return {"value": round(value / 1e9, 2), "unit": "GFLOPS"}
 
 
 def _round(value: float | None, digits: int) -> float | None:
@@ -254,8 +235,8 @@ async def overview(request: Request) -> JSONResponse:
         cli.query(Q_LINKS),
         cli.query(Q_HOSTS),
         cli.query(Q_PACKET_IN),
-        cli.query(q_cluster_cpu_flops_peak("fp32")),
-        cli.query(q_cluster_gpu_flops_peak("fp32")),
+        cli.query(q_cluster_cpu_flops_peak("fp64")),
+        cli.query(q_cluster_gpu_flops_peak("fp64")),
         return_exceptions=True,
     )
     prom_ok = not any(isinstance(r, Exception) for r in results)
@@ -281,13 +262,13 @@ async def overview(request: Request) -> JSONResponse:
         "links": metric_card(_scalar_safe(4), "条"),
         "hosts": metric_card(_scalar_safe(5), "个"),
         "packet_in": metric_card(_scalar_safe(6), "次"),
-        # 总算力取 FP32 口径（AI 推理与传统 HPC 的通用口径）。CPU 与 GPU 分两条
+        # 总算力取 FP64 口径（HPC/TOP500 的通用口径）。CPU 与 GPU 分两条
         # 查询后在 Python 里相加——两族指标标签集不同，PromQL 里相加要写
         # on(instance) group_left()，错得很安静。
-        "flops_fp32": metric_card(
-            _sum_flops([_flops_map((results[7], "fp32")), _flops_map((results[8], "fp32"))])
-            .get("fp32"),
-            "PFLOPS",
+        "flops_fp64": metric_card(
+            _sum_flops([_flops_map((results[7], "fp64")), _flops_map((results[8], "fp64"))])
+            .get("fp64"),
+            "FLOPS",
         ),
     }
     return cache_response(payload, max_age=request.app.state.settings.cards_cache_s)
@@ -355,23 +336,8 @@ async def map_data(request: Request) -> JSONResponse:
         if t.get("health") == "up":
             online_by_cluster[cid] = online_by_cluster.get(cid, 0) + 1
 
-    # 2. 集群峰值算力 + 各自的 CPU/GPU 利用率（算「已用算力」用）
+    # 2. 集群峰值算力
     cluster_flops = await _cluster_flops(request)
-    util_rows, gpu_util_rows = await asyncio.gather(
-        _safe_query(request, q_cpu_usage_by_cluster()),
-        _safe_query(request, q_gpu_util_by_cluster()),
-    )
-
-    def _util_by_cluster(rows, label_key) -> dict[str, float]:
-        out: dict[str, float] = {}
-        for r in rows or []:
-            v = _scalar([r])
-            if v is not None:
-                out[(r.get("metric") or {}).get(label_key, "")] = v
-        return out
-
-    cpu_util_by_cluster = _util_by_cluster(util_rows, "cluster")
-    gpu_util_by_cluster = _util_by_cluster(gpu_util_rows, "cluster")
 
     # 3. 合并 yaml 元数据 → 前端可直接渲染
     clusters: list[dict[str, Any]] = []
@@ -395,12 +361,8 @@ async def map_data(request: Request) -> JSONResponse:
             "online_nodes": online,
             "total_nodes": total,
             "status": status,
-            # 原始 FLOPS/s，由前端按 TF/PF/EF 格式化
+            # 原始 FLOPS/s，由前端按 G/T/P/EFLOPS 格式化
             "flops": _sum_flops([cf.get("cpu", {}), cf.get("gpu", {})]),
-            "flops_used": _used_flops(
-                cf.get("cpu", {}), cf.get("gpu", {}),
-                cpu_util_by_cluster.get(cid), gpu_util_by_cluster.get(cid),
-            ),
         })
 
     # 兜底：targets 不可达时仍展示 yaml 中的元数据（地图基本形状）
@@ -416,7 +378,6 @@ async def map_data(request: Request) -> JSONResponse:
                 "total_nodes": 0,
                 "status": "unknown",
                 "flops": {},
-                "flops_used": {},
             })
 
     return cache_response(
@@ -636,12 +597,6 @@ async def clusters(request: Request) -> JSONResponse:
             "gpu_max_temp_c": _round(gpu_temp, 1),
             "flops_peak": _sum_flops([cluster_flops.get(cid, {}).get("cpu", {}),
                                       cluster_flops.get(cid, {}).get("gpu", {})]),
-            "flops_used": _used_flops(
-                cluster_flops.get(cid, {}).get("cpu", {}),
-                cluster_flops.get(cid, {}).get("gpu", {}),
-                cpu_usage,
-                gpu_util,
-            ),
         })
 
     return cache_response({"items": items}, max_age=request.app.state.settings.cards_cache_s)
@@ -740,6 +695,7 @@ async def cluster_detail(cluster_id: str, request: Request) -> JSONResponse:
         nf = per_node_flops.get(n["instance"], {"cpu": {}, "gpu": {}})
         cluster_cpu_peak.append(nf["cpu"])
         cluster_gpu_peak.append(nf["gpu"])
+
         n_out = dict(n)
         n_out.update({
             "cpu_usage": _round_pct(cpu),
@@ -754,7 +710,6 @@ async def cluster_detail(cluster_id: str, request: Request) -> JSONResponse:
             "gpu_max_temp_c": _round(gpu_temp, 1),
             "gpu_mem_used_mib": _round(gpu_mem_used, 0),
             "flops_peak": _sum_flops([nf["cpu"], nf["gpu"]]),
-            "flops_used": _used_flops(nf["cpu"], nf["gpu"], cpu, gpu_util),
         })
         nodes_out.append(n_out)
 
@@ -787,10 +742,6 @@ async def cluster_detail(cluster_id: str, request: Request) -> JSONResponse:
         "gpu_util": _round(_agg(7), 1),
         "gpu_max_temp_c": _round(_agg(8), 1),
         "flops_peak": _sum_flops(cluster_cpu_peak + cluster_gpu_peak),
-        "flops_used": _used_flops(
-            _sum_flops(cluster_cpu_peak), _sum_flops(cluster_gpu_peak),
-            _agg(0), _agg(7),
-        ),
         "nodes": nodes_out,
     }
     return cache_response(payload, max_age=request.app.state.settings.cards_cache_s)
@@ -1060,7 +1011,6 @@ async def host_detail(instance: str, request: Request) -> JSONResponse:
 
         # 算力：原始 FLOPS/s，按精度分键（fp32/fp64/fp16）。fp16 仅 GPU 有。
         "flops_peak": _sum_flops([hf["cpu"], hf["gpu"]]),
-        "flops_used": _used_flops(hf["cpu"], hf["gpu"], _q(cpu), _q(gpu_util)),
 
         # 同集群其他主机（用于下拉框切换）。按 instance 排序。
         "cluster_hosts": sorted(

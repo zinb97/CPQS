@@ -184,21 +184,20 @@
 
   function fmtFlops(n) {
     if (n == null || !isFinite(n) || n <= 0) return null;
-    const units = ['TFLOPS', 'PFLOPS', 'EFLOPS'];
+    const units = ['GFLOPS', 'TFLOPS', 'PFLOPS', 'EFLOPS'];
     let i = 0;
     while (n >= 1000 && i < units.length - 1) { n /= 1000; i++; }
     return n.toFixed(n >= 100 ? 0 : n >= 10 ? 1 : 2) + ' ' + units[i];
   }
 
-  // 算力单元格：主数字 FP32 峰值，副行 FP64 + 已用。fp16（Tensor 口径）不占位。
-  function flopsCell(peak, used) {
+  // 算力单元格：主数字 FP64 峰值，副行 FP32。fp16（Tensor 口径）不占位。
+  function flopsCell(peak) {
     const p = peak || {};
-    const main = fmtFlops(p.fp32);
+    const main = fmtFlops(p.fp64);
     if (!main) return '<span style="color:var(--color-text-muted);">—</span>';
-    const sub = [fmtFlops(p.fp64), used && used.fp32 ? '已用 ' + fmtFlops(used.fp32) : null]
-      .filter(Boolean).join(' · ');
+    const sub = fmtFlops(p.fp32);
     return `<div class="usage-cell__text">${main}</div>
-      <div style="font-size:11px;color:var(--color-text-muted);">${sub}</div>`;
+      ${sub ? `<div style="font-size:11px;color:var(--color-text-muted);">FP32 ${sub}</div>` : ''}`;
   }
 
   function pctClass(v) {
@@ -243,7 +242,7 @@
       <td>${plainCell(c.max_temp_c != null ? c.max_temp_c.toFixed(1) + '°C' : null)}</td>
       <td>${c.gpu_count > 0 ? `<strong>${c.gpu_count}</strong> 卡` : '<span style="color:var(--color-text-muted);">—</span>'}</td>
       <td>${usageCell(c.gpu_util)}</td>
-      <td>${flopsCell(c.flops_peak, c.flops_used)}</td>
+      <td>${flopsCell(c.flops_peak)}</td>
     </tr>`;
   }
 

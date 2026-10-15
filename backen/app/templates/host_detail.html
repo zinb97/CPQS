@@ -278,25 +278,23 @@
   function fmtBytesPerSec(n) {
     return fmtBytes(n) + '/s';
   }
-  // 算力自适应单位：TFLOPS 起跳，超 1000 进 PF，再进 EF。
+  // 算力单位按量级自适应，保证数值落在 [1, 1000) 区间
   function fmtFlops(n) {
     if (n == null || !isFinite(n) || n <= 0) return '—';
-    const units = ['TFLOPS', 'PFLOPS', 'EFLOPS'];
+    const units = ['GFLOPS', 'TFLOPS', 'PFLOPS', 'EFLOPS'];
     let i = 0; while (n >= 1000 && i < units.length - 1) { n /= 1000; i++; }
     return n.toFixed(n >= 100 ? 0 : n >= 10 ? 1 : 2) + ' ' + units[i];
   }
-  // 峰值算力子行：主精度取 fp32，fp16（Tensor 口径）只在副标题里补充说明。
-  function renderFlops(peak, used) {
+  // 主数值取 FP64（HPC/TOP500 口径），副行补充 FP32 与 Tensor 口径。
+  function renderFlops(peak) {
     const card = document.getElementById('flopsCard');
     const p = peak || {};
     if (!p.fp32 && !p.fp64 && !p.fp16) { card.hidden = true; return; }
     card.hidden = false;
-    setText('mFlops', fmtFlops(p.fp32 || p.fp64));
-    const bits = [p.fp64 ? 'FP64 ' + fmtFlops(p.fp64) : ''];
+    setText('mFlops', fmtFlops(p.fp64 || p.fp32));
+    const bits = [p.fp32 ? 'FP32 ' + fmtFlops(p.fp32) : ''];
     if (p.fp16) bits.push('FP16 ' + fmtFlops(p.fp16));
-    const u = (used || {})[p.fp32 ? 'fp32' : 'fp64'];
-    bits.push(u ? '已用 ' + fmtFlops(u) : '已用 —');
-    setText('mFlopsUsed', bits.join(' · '));
+    setText('mFlopsUsed', bits.join(' · ') || '—');
   }
   function fmtTime(s) {
     if (!s) return '—';
@@ -523,7 +521,7 @@
     setText('mMemTot', fmtBytes(d.mem_total_bytes));
     setText('mDiskTot', d.disk_total_bytes != null ? fmtBytes(d.disk_total_bytes) : '—');
     setText('mProcs', d.procs_running);
-    renderFlops(d.flops_peak, d.flops_used);
+    renderFlops(d.flops_peak);
 
     // 用同集群其他主机填充下拉框（仅详情响应中包含，避免额外请求）
     if (Array.isArray(d.cluster_hosts)) {

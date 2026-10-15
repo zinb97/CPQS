@@ -206,34 +206,32 @@
   }
   function fmtFlops(n) {
     if (n == null || !isFinite(n) || n <= 0) return null;
-    const units = ['TFLOPS', 'PFLOPS', 'EFLOPS'];
+    const units = ['GFLOPS', 'TFLOPS', 'PFLOPS', 'EFLOPS'];
     let i = 0; while (n >= 1000 && i < units.length - 1) { n /= 1000; i++; }
     return n.toFixed(n >= 100 ? 0 : n >= 10 ? 1 : 2) + ' ' + units[i];
   }
   function pct(v) { return v == null ? '—' : v.toFixed(1) + '%'; }
 
-  function renderFlops(peak, used) {
+  // 主数值取 FP64（HPC/TOP500 口径），副行补充 FP32 与 Tensor 口径。
+  function renderFlops(peak) {
     const card = document.getElementById('flopsCard');
     const p = peak || {};
     if (!p.fp32 && !p.fp64 && !p.fp16) { card.hidden = true; return; }
     card.hidden = false;
-    document.getElementById('mFlops').textContent = fmtFlops(p.fp32 || p.fp64);
+    document.getElementById('mFlops').textContent = fmtFlops(p.fp64 || p.fp32);
     const bits = [];
-    if (p.fp64) bits.push('FP64 ' + fmtFlops(p.fp64));
+    if (p.fp32) bits.push('FP32 ' + fmtFlops(p.fp32));
     if (p.fp16) bits.push('FP16 ' + fmtFlops(p.fp16));
-    const key = p.fp32 ? 'fp32' : 'fp64';
-    bits.push((used || {})[key] ? '已用 ' + fmtFlops(used[key]) : '已用 —');
-    document.getElementById('mFlopsUsed').textContent = bits.join(' · ');
+    document.getElementById('mFlopsUsed').textContent = bits.join(' · ') || '—';
   }
 
-  function flopsCell(peak, used) {
+  function flopsCell(peak) {
     const p = peak || {};
-    const main = fmtFlops(p.fp32);
+    const main = fmtFlops(p.fp64);
     if (!main) return '<span style="color:var(--color-text-muted);">—</span>';
-    const sub = [fmtFlops(p.fp64), used && used.fp32 ? '已用 ' + fmtFlops(used.fp32) : null]
-      .filter(Boolean).join(' · ');
+    const sub = fmtFlops(p.fp32);
     return `<div>${main}</div>
-      <div style="font-size:10px;color:var(--color-text-muted);">${sub}</div>`;
+      ${sub ? `<div style="font-size:10px;color:var(--color-text-muted);">FP32 ${sub}</div>` : ''}`;
   }
 
   function render(nodes) {
@@ -264,7 +262,7 @@
         <td>${n.max_temp_c == null ? '—' : n.max_temp_c.toFixed(1) + '°C'}</td>
         <td>${n.procs_running ?? '—'}</td>
         <td>${gpuCell}</td>
-        <td>${flopsCell(n.flops_peak, n.flops_used)}</td>
+        <td>${flopsCell(n.flops_peak)}</td>
         <td style="font-size:11px;color:var(--color-text-secondary);">${fmtTime(n.last_scrape)}</td>
       </tr>`;
     }).join('');
@@ -292,7 +290,7 @@
       document.getElementById('mTemp').textContent = d.max_temp_c == null ? '—' : d.max_temp_c.toFixed(1) + '°C';
       document.getElementById('mCores').textContent = d.cpu_cores ?? '—';
       document.getElementById('mMemTot').textContent = fmtBytes(d.mem_total_bytes);
-      renderFlops(d.flops_peak, d.flops_used);
+      renderFlops(d.flops_peak);
       const status = d.status || 'unknown';
       const badge = document.getElementById('clusterStatus');
       badge.hidden = false;
