@@ -86,6 +86,23 @@
   color: var(--color-text-muted);
 }
 
+/* 主数值下方的补充说明（GPU 型号、算力的 FP64/已用副标题） */
+.metric-card__sub {
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* JS 控制的显隐必须能盖过组件自身的 display（如 .metric-card 的 flex）。
+   浏览器 UA 样式表里的 [hidden] { display: none } 优先级低于作者样式，
+   不加这条的话 el.hidden = true 对这些组件完全无效。 */
+[hidden] {
+  display: none !important;
+}
+
 /* 加载动画 */
 .loading {
   display: flex;

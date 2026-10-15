@@ -20,6 +20,64 @@ _LABEL_KEYS = ('gpu', 'UUID', 'pci_bus_id', 'device', 'modelName',
                'hostname', 'DCGM_FI_DRIVER_VERSION')
 
 
+# ---------------------------------------------------------------------------
+# 峰值算力规格表（FLOPS/s）
+# ---------------------------------------------------------------------------
+# NVML 没有 FLOPS 接口，理论峰值只能按型号查表。三个口径：
+#   fp32  —— 普通单精度向量单元，AI 推理与传统 HPC 都用它
+#   fp64  —— 双精度向量单元，HPC/TOP500 的传统口径
+#   fp16  —— Tensor Core 半精度，是 AI 训练真正关心的口径，通常是 fp32 的 8~16 倍。
+#            一律取 dense（稠密）值，不含 2:4 结构化稀疏——规格书常把稀疏值标 *,
+#            混用会让同一集群的总数失去可比性。
+#
+# 匹配方式是 modelName 子串包含，**顺序即优先级，特异性高的必须在前**
+# （`A100-SXM4-40GB` 必须排在 `A100` 之前，否则会被后者抢走）。
+# 数值取自 NVIDIA 官方规格表，单位 TFLOPS。
+_FLOPS_SPECS = [
+    ('H200',           67.0,   34.0,   989.0),
+    ('H100 SXM',       67.0,   34.0,   989.0),
+    ('H100 PCIe',      51.0,   26.0,   756.0),
+    ('H100',           67.0,   34.0,   989.0),
+    ('A100-SXM4-80',   19.5,    9.7,   312.0),
+    ('A100-PCIE-80',   19.5,    9.7,   312.0),
+    ('A100-SXM4-40',   19.5,    9.7,   312.0),
+    ('A100-PCIE-40',   19.5,    9.7,   312.0),
+    ('A100',           19.5,    9.7,   312.0),
+    ('A30',            16.0,    7.4,   165.0),
+    ('L40S',           91.6,    1.43,  362.0),
+    ('L40',            90.5,    1.43,  181.0),
+    ('A40',            37.4,    0.58,  149.7),
+    ('V100-SXM2-32',   15.7,    7.8,   125.0),
+    ('V100-SXM2-16',   14.0,    7.0,   112.0),
+    ('V100-PCIE-32',   14.0,    7.0,   112.0),
+    ('V100',           14.0,    7.0,   112.0),
+    ('T4',              8.1,    0.33,   65.0),
+    ('Quadro RTX 4000', 11.75,  0.294,  49.0),
+    ('RTX 4090',       82.6,    1.29,  330.0),
+    ('RTX 3090',       35.6,    0.56,  285.0),
+    ('RTX A6000',      38.7,    0.6,   154.0),
+]
+
+_TFLOPS = 1e12
+
+
+def _lookup_flops_specs(model_name):
+    """按 modelName 查规格表，返回 {precision: FLOPS/s}；型号未收录返回 {}。
+
+    未收录就不发指标。调用方靠 gpu_count 区分「这台机器没有 GPU 卡」与
+    「有卡但型号未收录」，页面明确提示后者，不静默当成 0。
+    """
+    name = model_name or ''
+    for matcher, fp32, fp64, fp16 in _FLOPS_SPECS:
+        if matcher in name:
+            return {
+                'fp32': fp32 * _TFLOPS,
+                'fp64': fp64 * _TFLOPS,
+                'fp16': fp16 * _TFLOPS,
+            }
+    return {}
+
+
 def _safe(fn, default=0):
     """包裹 pynvml 调用，失败返回 default。"""
     try:
@@ -231,6 +289,13 @@ class GpuCollector:
             for name, _extractor in METRICS:
                 lines.append(
                     f'{name}{{{labels_str}}} {gpu["metrics"].get(name, 0)}'
+                )
+            for precision, value in _lookup_flops_specs(
+                gpu.get('modelName')
+            ).items():
+                lines.append(
+                    f'node_gpu_flops_peak{{{labels_str},precision="{precision}"}} '
+                    f'{value:.0f}'
                 )
         return '\n'.join(lines) + '\n'
 

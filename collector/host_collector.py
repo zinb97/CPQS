@@ -5,6 +5,7 @@ Linux Host Collector
 """
 
 import os
+import re
 import time
 import json
 import glob
@@ -57,6 +58,43 @@ def _parse_paired_proto_stats(lines):
     return stats
 
 
+def _parse_base_ghz(model_name):
+    """从型号名尾部提取基础频率（GHz）。
+
+    形如 `Intel(R) Xeon(R) Gold 5218R CPU @ 2.10GHz` → 2.1。
+    用基础频率而非 cpufreq 实测值或睿频上限：peak 算力按 TOP500 惯例以基础频率计，
+    表示「装了多少算力」，是静态容量值，不随负载抖动。
+    提取不到返回 None，调用方据此不发指标，不猜。
+    """
+    m = re.search(r'@\s*([\d.]+)\s*GHz', model_name or '', re.IGNORECASE)
+    return float(m.group(1)) if m else None
+
+
+# 每物理核每周期可完成的浮点运算数（一条 FMA 计 2 FLOP：乘 + 加）。
+#
+#   AVX-512 : 512-bit = 16 字节 = 8 个 FP32 / 4 个 FP64，每核 2 条 FMA 流水线
+#             → FP32 2×8×2 = 32，FP64 2×4×2 = 16
+#   AVX2    : 256-bit → FP32 2×4×2 = 16，FP64 2×2×2 = 8
+#
+# AMD 护栏：Zen 4/5 对外在 /proc/cpuinfo 里宣称 avx512f，但实际是 2×256-bit 双泵 FMA，
+# 没有原生 512-bit 执行单元，按 flags 判定会高估 2 倍。因此 avx512f 档位只对 GenuineIntel
+# 开放，AMD 落到 avx2 档。两个方向都是保守估计。
+_FLOPS_PER_CYCLE = {
+    'avx512f': {'fp32': 32.0, 'fp64': 16.0},
+    'avx2': {'fp32': 16.0, 'fp64': 8.0},
+}
+_FLOPS_PER_CYCLE_BASELINE = {'fp32': 2.0, 'fp64': 1.0}
+
+
+def _flops_per_cycle(flags, vendor_id):
+    """按 SIMD 能力返回每核每周期 FLOP 数。"""
+    if 'avx512f' in flags and vendor_id.strip().lower() == 'genuineintel':
+        return _FLOPS_PER_CYCLE['avx512f']
+    if 'avx2' in flags:
+        return _FLOPS_PER_CYCLE['avx2']
+    return _FLOPS_PER_CYCLE_BASELINE
+
+
 # ---------------------------------------------------------------------------
 # Prometheus 发射常量与方法依赖
 # ---------------------------------------------------------------------------
@@ -98,6 +136,9 @@ class HostCollector:
             'mounts': self._read_mounts(),
             'thermal': self._read_thermal(),
         }
+        # 依赖上面刚解析出的 cpu_info（型号名里的基础频率 + 物理核数），
+        # 必须在字典构造完成后才能读到它。
+        self._data['cpu_flops'] = self._read_cpu_flops(self._data['cpu_info'])
 
     def _read_file(self, path: str, default=None):
         """安全读取文件"""
@@ -243,6 +284,47 @@ class HostCollector:
                 info[key] = int(raw) // 1000
 
         return info
+
+    def _read_cpu_flags(self) -> tuple[str, str]:
+        """读 /proc/cpuinfo 的 flags 与 vendor_id，只取第一段。
+
+        x86 每个核重复一遍相同的 flags 行，读到第一段即可。
+        flags 不作为标签上报（约 60 个 flag 会把 node_cpu_info 的标签集撑爆），
+        只在本地用于推导每核每周期 FLOP 数。
+        """
+        flags = vendor = ''
+        for line in self._read_lines('/proc/cpuinfo'):
+            if ':' not in line:
+                continue
+            key, _, value = line.partition(':')
+            key, value = key.strip(), value.strip()
+            if key == 'flags' and not flags:
+                flags = value
+            elif key == 'vendor_id' and not vendor:
+                vendor = value
+            if flags and vendor:
+                break
+        return flags, vendor
+
+    def _read_cpu_flops(self, cpu_info: dict) -> dict:
+        """推导 CPU 峰值算力 → {precision: FLOPS/s}。
+
+        peak = physical_cores × 基础频率GHz × 每核每周期 FLOP 数。
+
+        缺 physical_cores（部分虚拟化环境的 /proc/cpuinfo 没有 `cpu cores`）或
+        型号名里解析不出基础频率时返回空 dict，对应指标直接不发——宁可没有，
+        也不要发一个编造出来的数字。
+        """
+        cores = cpu_info.get('physical_cores')
+        base_ghz = _parse_base_ghz(cpu_info.get('model_name'))
+        if not cores or not base_ghz:
+            return {}
+        flags, vendor = self._read_cpu_flags()
+        per_cycle = _flops_per_cycle(flags, vendor)
+        return {
+            precision: float(cores) * base_ghz * 1e9 * flops
+            for precision, flops in per_cycle.items()
+        }
 
     def _read_loadavg(self) -> dict:
         """读取 /proc/loadavg """
@@ -434,6 +516,7 @@ class HostCollector:
         self._emit_info(lines, 'dmi', data.get('dmi', {}))
         self._emit_cpu(lines, data.get('cpu_stat', {}))
         self._emit_cpu_info(lines, data.get('cpu_info', {}))
+        self._emit_cpu_flops(lines, data.get('cpu_flops', {}))
         self._emit_loadavg(lines, data.get('loadavg', {}))
         self._emit_memory(lines, data.get('meminfo', {}))
         self._emit_proto_flat(lines, 'node_snmp', data.get('snmp', {}))
@@ -483,6 +566,18 @@ class HostCollector:
             f'{k}="{_escape_label_value(v)}"' for k, v in info.items()
         )
         lines.append(f'node_cpu_info{{{labels}}} 1')
+
+    @staticmethod
+    def _emit_cpu_flops(lines, flops):
+        """发射 CPU 峰值算力：一个指标名 + precision 标签，两种精度各一条 series。
+
+        peak 是装机容量而非时序量，刻意不加任何标签（instance/cluster 由 scrape 注入），
+        这样 sum by(cluster) / sum by(cluster, precision) 都是一次除法就完的聚合。
+        """
+        for precision, value in flops.items():
+            lines.append(
+                f'node_cpu_flops_peak{{precision="{precision}"}} {value:.0f}'
+            )
 
     @staticmethod
     def _emit_loadavg(lines, loadavg):

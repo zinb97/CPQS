@@ -27,9 +27,10 @@
             <th>最高温度</th>
             <th>GPU 卡数</th>
             <th>GPU 利用率</th>
+            <th>峰值算力</th>
           </tr>
         </thead>
-        <tbody><tr><td colspan="13" class="clusters-table__empty">加载中...</td></tr></tbody>
+        <tbody><tr><td colspan="14" class="clusters-table__empty">加载中...</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -181,6 +182,25 @@
     return n.toFixed(n >= 100 ? 0 : 1) + ' ' + units[i];
   }
 
+  function fmtFlops(n) {
+    if (n == null || !isFinite(n) || n <= 0) return null;
+    const units = ['TFLOPS', 'PFLOPS', 'EFLOPS'];
+    let i = 0;
+    while (n >= 1000 && i < units.length - 1) { n /= 1000; i++; }
+    return n.toFixed(n >= 100 ? 0 : n >= 10 ? 1 : 2) + ' ' + units[i];
+  }
+
+  // 算力单元格：主数字 FP32 峰值，副行 FP64 + 已用。fp16（Tensor 口径）不占位。
+  function flopsCell(peak, used) {
+    const p = peak || {};
+    const main = fmtFlops(p.fp32);
+    if (!main) return '<span style="color:var(--color-text-muted);">—</span>';
+    const sub = [fmtFlops(p.fp64), used && used.fp32 ? '已用 ' + fmtFlops(used.fp32) : null]
+      .filter(Boolean).join(' · ');
+    return `<div class="usage-cell__text">${main}</div>
+      <div style="font-size:11px;color:var(--color-text-muted);">${sub}</div>`;
+  }
+
   function pctClass(v) {
     if (v == null) return '';
     if (v >= 85) return 'usage-cell__fill--high';
@@ -223,6 +243,7 @@
       <td>${plainCell(c.max_temp_c != null ? c.max_temp_c.toFixed(1) + '°C' : null)}</td>
       <td>${c.gpu_count > 0 ? `<strong>${c.gpu_count}</strong> 卡` : '<span style="color:var(--color-text-muted);">—</span>'}</td>
       <td>${usageCell(c.gpu_util)}</td>
+      <td>${flopsCell(c.flops_peak, c.flops_used)}</td>
     </tr>`;
   }
 
@@ -233,7 +254,7 @@
       const data = await r.json();
       const items = data.items || [];
       if (!items.length) {
-        tbody.innerHTML = '<tr><td colspan="13" class="clusters-table__empty">暂无集群数据</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="14" class="clusters-table__empty">暂无集群数据</td></tr>';
         return;
       }
       tbody.innerHTML = items.map(renderRow).join('');
@@ -244,7 +265,7 @@
         });
       });
     } catch (e) {
-      tbody.innerHTML = '<tr><td colspan="13" class="clusters-table__empty">数据加载失败</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="14" class="clusters-table__empty">数据加载失败</td></tr>';
     }
   }
 

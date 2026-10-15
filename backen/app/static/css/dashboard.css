@@ -553,6 +553,13 @@
   font-weight: 700;
 }
 .dashboard-screen .compute-row .name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 名称后的算力规模标注：同行次要信息，不另起一行以免行高跳变 */
+.dashboard-screen .compute-row .name .sub {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: "Consolas", monospace;
+}
 .dashboard-screen .compute-row .bar {
   height: 6px;
   background: rgba(0, 229, 255, 0.1);

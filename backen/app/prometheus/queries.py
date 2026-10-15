@@ -21,9 +21,6 @@ Q_PACKET_IN = "sum(qos_switch_packet_in_total)"
 # ===== 地图数据 =====
 # 各集群在线节点数与集群列表均由 /api/v1/targets 推导（PrometheusClient.targets），
 # 不再用 PromQL（up{job=~"node-.*"} 系列）。
-# 各集群总算力（占位：实际 PromQL 需 collector 暴露 qos_cluster_total_flops 之类指标）
-Q_CLUSTERS_FLOPS = "sum by(cluster) (qos_cluster_total_flops)"
-Q_CLUSTERS_USED_FLOPS = "sum by(cluster) (qos_cluster_used_flops)"
 
 
 # ===== 带宽趋势（24h，5m 步进）=====
@@ -211,6 +208,15 @@ def q_node_gpu_count(instance: str) -> str:
     return f'count(DCGM_FI_DEV_GPU_UTIL{{instance="{instance}"}})'
 
 
+def q_node_gpu_models(instance: str) -> str:
+    """单节点 GPU 型号 → 卡数。
+
+    collector 的 DCGM 指标带 `modelName` 标签（来自 nvmlDeviceGetName），
+    按型号分组计数即可得到「型号: 卡数」，同机异构卡会返回多条。
+    """
+    return f'count by(modelName) (DCGM_FI_DEV_GPU_UTIL{{instance="{instance}"}})'
+
+
 def q_node_gpu_util(instance: str) -> str:
     """单节点 GPU 平均利用率（%）。"""
     return f'avg(DCGM_FI_DEV_GPU_UTIL{{instance="{instance}"}})'
@@ -224,6 +230,58 @@ def q_node_gpu_temp(instance: str) -> str:
 def q_node_gpu_mem_used(instance: str) -> str:
     """单节点 GPU 显存已用总量（MiB）。"""
     return f'sum(DCGM_FI_DEV_FB_USED{{instance="{instance}"}})'
+
+
+# ===== 算力（FLOPS）=====
+# collector 按硬件规格发布峰值算力（静态装机容量，非时序量）：
+#   node_cpu_flops_peak{precision="fp32"|"fp64"}          CPU 基础频率 × 物理核数 × SIMD 吞吐
+#   node_gpu_flops_peak{precision=...,gpu=...,modelName=...}  型号规格表查得的单卡峰值
+# 用 precision 标签而非 _fp32/_fp64 独立指标名，这样 sum by(cluster, precision)
+# 一条查询就能同时聚合三种口径。「已用算力」不采集，由 peak × 利用率在后端算出。
+#
+# CPU 与 GPU 的相加放在 Python 里做，不写进 PromQL：两族指标标签集不同
+# （GPU 多了 gpu/UUID/modelName/pci_bus_id），跨族相加要写 on(instance) group_left()，
+# 极易写错且错得静默。
+
+FLOPS_PRECISIONS = ("fp32", "fp64", "fp16")
+
+
+def q_node_cpu_flops_peak(instance: str, precision: str) -> str:
+    """单节点 CPU 峰值算力（FLOPS/s）。"""
+    return f'node_cpu_flops_peak{{instance="{instance}",precision="{precision}"}}'
+
+
+def q_node_gpu_flops_peak(instance: str, precision: str) -> str:
+    """单节点全部 GPU 卡的峰值算力合计（FLOPS/s）。"""
+    return f'sum(node_gpu_flops_peak{{instance="{instance}",precision="{precision}"}})'
+
+
+def q_cluster_cpu_flops_peak(precision: str) -> str:
+    """集群 CPU 峰值算力合计（FLOPS/s）。"""
+    return f'sum by(cluster) (node_cpu_flops_peak{{precision="{precision}"}})'
+
+
+def q_cluster_gpu_flops_peak(precision: str) -> str:
+    """集群全部节点 GPU 峰值算力合计（FLOPS/s）。"""
+    return f'sum by(cluster) (node_gpu_flops_peak{{precision="{precision}"}})'
+
+
+def q_cpu_usage_by_cluster() -> str:
+    """全部集群的 CPU 使用率（0~1），一次 `by(cluster)` 拿完。
+
+    与 `q_cluster_cpu_usage` 同式，只是不带 cluster 过滤，供大屏地图用。
+    """
+    return (
+        'avg by(cluster) (1 - ('
+        'rate(node_cpu_seconds_total{mode="idle"}[1m])'
+        ' / ignoring(mode) node_cpu_cores'
+        '))'
+    )
+
+
+def q_gpu_util_by_cluster() -> str:
+    """全部集群的 GPU 平均利用率（0~100 百分数）。"""
+    return "avg by(cluster) (DCGM_FI_DEV_GPU_UTIL)"
 
 
 def load_cluster_locations(path: str | Path) -> dict[str, dict[str, Any]]:

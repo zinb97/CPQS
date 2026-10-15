@@ -23,12 +23,13 @@
   </div>
 
   <div class="host-detail__top">
-    <div class="metric-card gpu-dependent">
+    <div class="metric-card gpu-dependent" hidden>
       <div class="metric-card__header">
-        <span class="metric-card__label">GPU 卡数</span>
+        <span class="metric-card__label">GPU</span>
         <div class="metric-card__icon metric-card__icon--blue">●</div>
       </div>
       <div class="metric-card__value" id="mGpuCount">—</div>
+      <div class="metric-card__sub" id="mGpuModel">—</div>
     </div>
     <div class="metric-card">
       <div class="metric-card__header">
@@ -58,6 +59,14 @@
       </div>
       <div class="metric-card__value" id="mProcs">—</div>
     </div>
+    <div class="metric-card" id="flopsCard" hidden>
+      <div class="metric-card__header">
+        <span class="metric-card__label">峰值算力</span>
+        <div class="metric-card__icon metric-card__icon--blue">●</div>
+      </div>
+      <div class="metric-card__value" id="mFlops">—</div>
+      <div class="metric-card__sub" id="mFlopsUsed">—</div>
+    </div>
   </div>
 
   <div class="host-detail__charts">
@@ -85,15 +94,15 @@
       <div class="chart-card__title">网络吞吐（B/s）</div>
       <div id="chartNet" class="chart-card__chart"></div>
     </div>
-    <div class="chart-card gpu-dependent">
+    <div class="chart-card gpu-dependent" hidden>
       <div class="chart-card__title">GPU 平均利用率（%）</div>
       <div id="chartGpuUtil" class="chart-card__chart"></div>
     </div>
-    <div class="chart-card gpu-dependent">
+    <div class="chart-card gpu-dependent" hidden>
       <div class="chart-card__title">GPU 最高温度（°C）</div>
       <div id="chartGpuTemp" class="chart-card__chart"></div>
     </div>
-    <div class="chart-card gpu-dependent">
+    <div class="chart-card gpu-dependent" hidden>
       <div class="chart-card__title">GPU 显存占用（MiB）</div>
       <div id="chartGpuMem" class="chart-card__chart"></div>
     </div>
@@ -184,13 +193,15 @@
   .inline-select--wide { min-width: 200px; }
   .host-detail__top {
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
+    /* 卡片数随 GPU 显隐变化（5 张或 4 张），auto-fit 让两种情况都填满整行 */
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
     gap: 12px;
     flex-shrink: 0;
   }
   .host-detail__charts {
     display: grid;
-    grid-template-columns: 1fr;
+    /* 9 张图（有 GPU）或 6 张（无 GPU），auto-fit 两种情况都无空格 */
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
     gap: 12px;
   }
   .chart-card {
@@ -266,6 +277,26 @@
   }
   function fmtBytesPerSec(n) {
     return fmtBytes(n) + '/s';
+  }
+  // 算力自适应单位：TFLOPS 起跳，超 1000 进 PF，再进 EF。
+  function fmtFlops(n) {
+    if (n == null || !isFinite(n) || n <= 0) return '—';
+    const units = ['TFLOPS', 'PFLOPS', 'EFLOPS'];
+    let i = 0; while (n >= 1000 && i < units.length - 1) { n /= 1000; i++; }
+    return n.toFixed(n >= 100 ? 0 : n >= 10 ? 1 : 2) + ' ' + units[i];
+  }
+  // 峰值算力子行：主精度取 fp32，fp16（Tensor 口径）只在副标题里补充说明。
+  function renderFlops(peak, used) {
+    const card = document.getElementById('flopsCard');
+    const p = peak || {};
+    if (!p.fp32 && !p.fp64 && !p.fp16) { card.hidden = true; return; }
+    card.hidden = false;
+    setText('mFlops', fmtFlops(p.fp32 || p.fp64));
+    const bits = [p.fp64 ? 'FP64 ' + fmtFlops(p.fp64) : ''];
+    if (p.fp16) bits.push('FP16 ' + fmtFlops(p.fp16));
+    const u = (used || {})[p.fp32 ? 'fp32' : 'fp64'];
+    bits.push(u ? '已用 ' + fmtFlops(u) : '已用 —');
+    setText('mFlopsUsed', bits.join(' · '));
   }
   function fmtTime(s) {
     if (!s) return '—';
@@ -488,22 +519,33 @@
     const hostName = (d.uname && d.uname.nodename) || '';
     document.getElementById('hostTitle').textContent =
       (hostName && hostName !== hostIp) ? `${hostName}（${hostIp}）` : hostIp;
-    setText('mGpuCount', d.gpu_count > 0 ? d.gpu_count + ' 卡' : '—');
     setText('mCpuCores', d.cpu_cores != null ? d.cpu_cores + ' 核' : '—');
     setText('mMemTot', fmtBytes(d.mem_total_bytes));
     setText('mDiskTot', d.disk_total_bytes != null ? fmtBytes(d.disk_total_bytes) : '—');
     setText('mProcs', d.procs_running);
+    renderFlops(d.flops_peak, d.flops_used);
 
     // 用同集群其他主机填充下拉框（仅详情响应中包含，避免额外请求）
     if (Array.isArray(d.cluster_hosts)) {
       renderHostSwitcher(d.cluster_hosts);
     }
 
-    // GPU 可见性：gpu_count === 0 时隐藏相关卡片与图表
+    // GPU 可见性：gpu_count === 0 时隐藏 GPU 卡片与三张图表。
+    // 卡片在 SSR 里就是 hidden，避免接口返回前闪现一张空卡片。
     GPU_VISIBLE = (d.gpu_count || 0) > 0;
     document.querySelectorAll('.gpu-dependent').forEach((el) => {
       el.hidden = !GPU_VISIBLE;
     });
+    // GPU 图表是在 hidden 容器上 init 的，宽度量到 0；显示后必须 resize 一次
+    if (GPU_VISIBLE) {
+      resizeAll();
+      setText('mGpuCount', d.gpu_count + ' 卡');
+      // 同机异构卡会返回多项，用「+N 型号」提示还有别的型号
+      const models = d.gpu_models || [];
+      const main = models[0];
+      setText('mGpuModel',
+        main ? (models.length > 1 ? `${main.model} +${models.length - 1} 型号` : main.model) : '—');
+    }
 
     setText('iCluster', d.cluster_name || d.cluster_id || '—');
     setText('iJob', d.job);

@@ -429,7 +429,10 @@
       const byRegion = {};
       allClusters.forEach((c) => {
         const k = c.region || '其他';
-        byRegion[k] = (byRegion[k] || 0) + Math.max(c.online_nodes, 0);
+        // 按 FP32 峰值算力聚合，这张图叫「算力资源」就该是算力而非节点数。
+        // 上游无算力指标的集群（老采集器）会得 0，退回节点数至少不空。
+        const v = c.flops && c.flops.fp32 > 0 ? c.flops.fp32 : Math.max(c.online_nodes, 0);
+        byRegion[k] = (byRegion[k] || 0) + v;
       });
       const data = Object.entries(byRegion).map(([name, value]) => ({ name, value }));
       if (!data.length) {
@@ -439,7 +442,13 @@
       }
       const palette = ['#00e5ff', '#00ff9d', '#b388ff', '#ffb347', '#ff5577', '#1a8a9c'];
       resourceChart.setOption({
-        tooltip: { trigger: 'item', textStyle: { color: '#fff' } },
+        tooltip: {
+          trigger: 'item',
+          textStyle: { color: '#fff' },
+          valueFormatter: (v) => (v >= 1e15
+            ? (v / 1e15).toFixed(2) + ' EFLOPS'
+            : (v / 1e12).toFixed(2) + ' TFLOPS'),
+        },
         legend: {
           bottom: 0,
           textStyle: { color: '#a4c8ff', fontSize: 11 },
@@ -631,22 +640,26 @@
       el.innerHTML = '<div class="ds-empty" style="height:100%;">暂无集群数据</div>';
       return;
     }
-    // 按在线节点数排序
+    // 按 FP32 峰值算力排序——这栏叫「算力中心」，排的应该是算力不是节点数。
+    const peakOf = (c) => (c.flops && c.flops.fp32 > 0 ? c.flops.fp32 : 0);
     const sorted = [...allClusters]
-      .sort((a, b) => (b.online_nodes || 0) - (a.online_nodes || 0))
+      .sort((a, b) => peakOf(b) - peakOf(a))
       .slice(0, 6);
 
     el.innerHTML = sorted.map((c, i) => {
-      const online = c.online_nodes || 0;
-      const total = c.total_nodes || online || 1;
-      const load = Math.min(100, Math.round((online / total) * 100));
+      const peak = peakOf(c);
+      // 已用算力 / 峰值 = 真实利用率。旧版本这里画的是 online/total 的存活率，
+      // 那不是负载，只是节点活着没有。
+      const used = (c.flops && c.flops.fp32) ? (c.flops_used && c.flops_used.fp32) || 0 : 0;
+      const load = peak > 0 ? Math.min(100, Math.round((used / peak) * 100)) : 0;
       const color = load >= 85 ? 'var(--orange)' : (load >= 60 ? 'var(--cyan)' : 'var(--green)');
       const name = `${c.name}（${c.region || '—'}）`;
+      const scale = peak >= 1e15 ? (peak / 1e15).toFixed(2) + ' PF' : (peak / 1e12).toFixed(1) + ' TF';
       return `<div class="compute-row">
         <span class="rank">#${String(i+1).padStart(2,'0')}</span>
-        <span class="name">${name}</span>
+        <span class="name">${name}<span class="sub">${peak > 0 ? scale : '算力未上报'}</span></span>
         <div class="bar" style="--w:${load}%"></div>
-        <span class="pct" style="color:${color}">${load}%</span>
+        <span class="pct" style="color:${color}">${peak > 0 ? load + '%' : '—'}</span>
       </div>`;
     }).join('');
   }
