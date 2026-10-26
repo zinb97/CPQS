@@ -23,10 +23,11 @@ Q_PACKET_IN = "sum(qos_switch_packet_in_total)"
 # 不再用 PromQL（up{job=~"node-.*"} 系列）。
 
 
-# ===== 带宽趋势（24h，5m 步进）=====
+# ===== 网络趋势（24h，5m 步进）=====
 # 源指标为 bytes/s：×8 转 bits/s、÷1e6 转 Mbps，与 dashboard 的 Mbps 口径一致。
-Q_BANDWIDTH_RANGE = "sum(rate(node_network_transmit_bytes_total[5m])) * 8 / 1000000"
-Q_LATENCY_RANGE = "qos_link_latency_ms"
+# 入向与出向分两条：早先把出向写成「入向 × 随机系数」，那是编的。
+Q_BANDWIDTH_RX_RANGE = "sum(rate(node_network_receive_bytes_total[5m])) * 8 / 1000000"
+Q_BANDWIDTH_TX_RANGE = "sum(rate(node_network_transmit_bytes_total[5m])) * 8 / 1000000"
 
 
 # ===== 网络链路质量 =====
@@ -34,10 +35,18 @@ Q_LATENCY_RANGE = "qos_link_latency_ms"
 # 注意标签名是 src_dpid/dst_dpid，不是 source/target。
 Q_LINKS_QUALITY = "qos_link_delay_ms"
 Q_LINKS_LOSS = "qos_link_loss_percent"
+# 带宽占用（bit/s）。当前恒为 0（网络暂无流量），有流量时它就是 QoS 雷达
+# 「带宽余量」的分子，额定值来自 Settings.network_rated_mbps。
+Q_LINKS_BANDWIDTH = "sum(qos_link_bandwidth_usage_bits)"
 
 
 # ===== 告警事件 =====
 Q_EVENTS = "ALERTS"
+
+# ===== QoS 评分雷达 =====
+# qos_rules_active：控制器当前生效的 QoS/DSCP 策略条数。目前恒为 0
+# （策略尚未下发），只作「安全性」维度的旁证，不参与计分。
+Q_RULES_ACTIVE = "qos_rules_active"
 
 
 # ===== 资源管控中心页面 PromQL 模板 =====

@@ -15,6 +15,11 @@ class Settings:
     # HTTP 客户端
     request_timeout_s: float = 3.0
 
+    # 网络额定带宽（Mbps）。QoS 雷达的「带宽余量」维度需要它做基准：
+    # 控制器只上报当前占用 qos_link_bandwidth_usage_bits，不含链路额定速率，
+    # 没有基准就算不出余量。1000 Mbps 对应千兆口，是当前网络的合理假设。
+    network_rated_mbps: float = 1000.0
+
     # 前端轮询周期（仅记录用，实际由前端 JS 控制）
     cards_refresh_s: int = 5
     charts_refresh_s: int = 30
@@ -29,4 +34,7 @@ class Settings:
             prometheus_url=os.getenv("PROMETHEUS_URL", cls.prometheus_url),
             cluster_meta_path=os.getenv("CLUSTER_META_PATH", cls.cluster_meta_path),
             request_timeout_s=float(os.getenv("REQUEST_TIMEOUT_S", cls.request_timeout_s)),
+            network_rated_mbps=float(
+                os.getenv("NETWORK_RATED_MBPS", cls.network_rated_mbps)
+            ),
         )

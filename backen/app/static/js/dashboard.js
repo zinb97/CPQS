@@ -116,9 +116,7 @@
   }
 
   // ===== 3. KPI 5 卡 =====
-  let kpiLatestData = {};
   function renderKpiCards(data) {
-    kpiLatestData = data || {};
     const el = $('#kpiStrip');
     if (!el) return;
     const keys = JSON.parse(el.dataset.keys || '[]');
@@ -477,7 +475,7 @@
     resourceChart._raw = render;
   }
 
-  // ===== 6. 网络流量折线 =====
+  // ===== 6. 网络流量折线（入向 / 出向）=====
   let trafficChart;
   function initTrafficChart() {
     const el = $('#chartTraffic');
@@ -485,25 +483,31 @@
     trafficChart = echarts.init(el);
 
     const xData = [];
-    const inData = [];
-    const outData = [];
+    const rxData = [];
+    const txData = [];
 
-    function render(series) {
-      const data = series || [];
-      if (!data.length) {
+    function render(payload) {
+      const rx = (payload && payload.rx) || [];
+      const tx = (payload && payload.tx) || [];
+      const times = rx.length ? rx.map((d) => d.time) : tx.map((d) => d.time);
+      if (!times.length) {
         el.innerHTML = '<div class="ds-empty">暂无流量数据</div>';
         trafficChart.clear();
         return;
       }
       xData.length = 0;
-      inData.length = 0;
-      outData.length = 0;
-      data.forEach((d) => {
-        xData.push(d.time);
-        // 转出字节当作入向（演示用）；asymmetric 数学校验：无
-        inData.push(d.value);
-        outData.push(Math.max(0, d.value * (0.6 + Math.random() * 0.6)));
-      });
+      rxData.length = 0;
+      txData.length = 0;
+      times.forEach((t) => { xData.push(t); });
+      // 两条序列时间戳同源（同一 step 的 query_range），按 time 对齐即可。
+      // 对不上的点留 null 而不是填 0 —— 填 0 会被 ECharts 连成一条下坠的线，
+      // 看起来像"流量掉到零"，实际是没数据。
+      const align = (rows) => {
+        const m = new Map(rows.map((d) => [d.time, d.value]));
+        return times.map((t) => (m.has(t) ? m.get(t) : null));
+      };
+      rxData.push(...align(rx));
+      txData.push(...align(tx));
       trafficChart.setOption({
         tooltip: { trigger: 'axis', textStyle: { color: '#fff' } },
         legend: {
@@ -519,7 +523,8 @@
           splitLine: { show: false },
         },
         yAxis: {
-          type: 'value',
+          type: 'value', name: 'Mbps',
+          nameTextStyle: { color: '#6e88ad', fontSize: 10 },
           axisLine: { show: false },
           axisLabel: { color: '#6e88ad', fontSize: 10 },
           splitLine: { lineStyle: { color: 'rgba(0,229,255,0.08)' } },
@@ -534,7 +539,7 @@
                 { offset: 1, color: 'rgba(0,229,255,0.02)' },
               ]),
             },
-            data: inData,
+            data: rxData,
           },
           {
             name: '出向流量', type: 'line', smooth: true, symbol: 'none',
@@ -545,23 +550,18 @@
                 { offset: 1, color: 'rgba(0,255,157,0.02)' },
               ]),
             },
-            data: outData,
+            data: txData,
           },
         ],
       });
     }
 
-    if (CONFIG.initialBandwidth && CONFIG.initialBandwidth.length) {
-      render(CONFIG.initialBandwidth);
-    } else {
-      render([]);
-    }
+    render(CONFIG.initialBandwidth);
 
     async function refresh() {
       try {
         const r = await fetch('/api/metrics/bandwidth');
-        const data = await r.json();
-        render(data.series || []);
+        render(await r.json());
       } catch (e) {
         // 保留上次
       }
@@ -575,61 +575,81 @@
     const el = $('#chartQos');
     if (!el || typeof echarts === 'undefined') return;
     qosChart = echarts.init(el);
-    // 评分基线由指标推导：links(可用性), packet_in(抖动), online_nodes/total_nodes(健康度)
-    function computeScore() {
-      const online = (kpiLatestData.online_nodes || {}).value || 0;
-      const total = (kpiLatestData.total_nodes || {}).value || 0;
-      const health = total > 0 ? (online / total) * 100 : 0;
-      const links = (kpiLatestData.links || {}).value || 0;
-      const switches = (kpiLatestData.switches || {}).value || 0;
-      const avail = Math.min(100, 80 + (switches > 0 ? 15 : 0));
-      const bandwidth = links > 0 ? Math.min(100, 70 + Math.log10(links + 1) * 8) : 0;
-      const latency = health > 90 ? 95 : health > 70 ? 85 : 70;
-      const jitter = Math.max(0, 100 - (kpiLatestData.packet_in?.value || 0) / 100);
-      const loss = Math.max(0, 100 - (kpiLatestData.packet_in?.value || 0) / 200);
-      const security = 92; // 占位：未暴露指标
-      return [
-        Math.round(latency),
-        Math.round(jitter),
-        Math.round(loss),
-        Math.round(avail),
-        Math.round(bandwidth),
-        security,
-      ];
-    }
+    // 占位维度画成半径 0 的点（落在图心），并用灰色虚线连出「这里没有数据」，
+    // 而不是补一个假的分数——补了就会被当成实测结果读。
+    const PLACEHOLDER = '#5a7194';
 
-    function render() {
+    function render(dims) {
+      const list = (dims && dims.length) ? dims : [];
+      const values = list.map((d) => (d.measured && d.score != null ? Math.round(d.score) : 0));
+      const measured = list.map((d) => !!(d.measured && d.score != null));
+      // ECharts radar 不支持一条 series 内分段着色，占位点用单独的 symbol 覆盖
+      const symbol = list.map((_, i) =>
+        measured[i]
+          ? 'circle'
+          : 'path://M0 0 L0 0 L0 0 Z'  // 退化路径：渲染成一个点
+      );
       qosChart.setOption({
-        tooltip: {},
+        tooltip: {
+          trigger: 'item',
+          textStyle: { color: '#fff' },
+          formatter: () => list.map((d) =>
+            `${d.measured ? '●' : '○'} ${d.label}：${
+              d.measured && d.score != null ? Math.round(d.score) + ' 分'
+                : '未采集'
+            }<br/><span style="color:#8fb0d8">${d.detail || ''}</span>`
+          ).join('<br/>'),
+        },
         radar: {
           center: ['50%', '52%'],
           radius: '62%',
-          indicator: [
-            { name: '时延', max: 100 },
-            { name: '抖动', max: 100 },
-            { name: '丢包率', max: 100 },
-            { name: '可用性', max: 100 },
-            { name: '带宽', max: 100 },
-            { name: '安全性', max: 100 },
-          ],
-          axisName: { color: '#a4c8ff', fontSize: 11 },
+          indicator: list.map((d) => ({ name: d.label, max: 100 })),
+          axisName: {
+            color: '#a4c8ff', fontSize: 11,
+            formatter: (name) => {
+              const d = list.find((x) => x.label === name);
+              return d && !(d.measured && d.score != null) ? name + '  未采集' : name;
+            },
+          },
           splitLine: { lineStyle: { color: 'rgba(0,229,255,0.18)' } },
           splitArea: { areaStyle: { color: ['rgba(0,229,255,0.02)', 'rgba(0,229,255,0.05)'] } },
           axisLine: { lineStyle: { color: 'rgba(0,229,255,0.2)' } },
         },
         series: [{
           type: 'radar',
-          symbol: 'circle',
+          symbol: symbol,
           symbolSize: 4,
           lineStyle: { color: '#00e5ff', width: 2 },
-          itemStyle: { color: '#00e5ff' },
+          itemStyle: { color: (p) => (measured[p.dataIndex] ? '#00e5ff' : PLACEHOLDER) },
           areaStyle: { color: 'rgba(0,229,255,0.25)' },
-          data: [{ value: computeScore(), name: '当前评分' }],
+          data: [{ value: values, name: '当前评分' }],
         }],
       });
     }
-    render();
-    setInterval(render, CARDS_MS);
+
+    async function refresh() {
+      try {
+        const r = await fetch('/api/metrics/qos');
+        const data = await r.json();
+        const dims = data.dimensions || [];
+        render(dims);
+        // 角标如实反映有几个维度是真有指标的，别再挂一个写死的 "A+"
+        const measured = dims.filter((d) => d.measured && d.score != null).length;
+        const tag = $('#qosTag');
+        if (tag) {
+          tag.textContent = measured
+            ? `${measured}/${dims.length} 项实测`
+            : '暂无指标';
+          tag.title = dims
+            .map((d) => `${d.measured ? '●' : '○'} ${d.label}：${d.detail || ''}`)
+            .join('\n');
+        }
+      } catch (e) {
+        // 保留上次
+      }
+    }
+    refresh();
+    setInterval(refresh, CARDS_MS);
   }
 
   // ===== 8. TOP6 算力中心列表 =====

@@ -1,40 +1,50 @@
 """Dashboard 路由：SSR 渲染首页 + 初始快照数据。"""
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
+from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from app.menu import base_context
 from app.prometheus.client import PrometheusClient
-from app.prometheus.queries import Q_BANDWIDTH_RANGE
+from app.prometheus.queries import Q_BANDWIDTH_RX_RANGE, Q_BANDWIDTH_TX_RANGE
 
 
 router = APIRouter()
 
 
-async def _bandwidth_series(client: PrometheusClient) -> list[tuple[str, float]]:
-    """拉取 24h 带宽趋势（前端首屏填充，避免空白图）。"""
-    end = datetime.now()
-    start = end - timedelta(hours=24)
-    try:
-        result = await client.query_range(Q_BANDWIDTH_RANGE, start, end, step="5m")
-    except Exception:
+def _to_series(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """query_range 结果 → [{time: 'HH:MM', value}, ...]；空或失败返回 []。"""
+    if not rows:
         return []
-    if not result:
-        return []
-    values = result[0].get("values", [])
-    out: list[tuple[str, float]] = []
-    for ts, v in values:
+    out: list[dict[str, Any]] = []
+    for ts, v in rows[0].get("values", []):
         try:
-            out.append((
-                datetime.fromtimestamp(float(ts)).strftime("%H:%M"),
-                float(v),
-            ))
+            out.append({
+                "time": datetime.fromtimestamp(float(ts)).strftime("%H:%M"),
+                "value": round(float(v), 2),
+            })
         except (ValueError, TypeError):
             continue
     return out
+
+
+async def _network_trend(client: PrometheusClient) -> dict[str, list[dict[str, Any]]]:
+    """24h 带宽趋势首屏快照：入向 / 出向。"""
+    end = datetime.now()
+    start = end - timedelta(hours=24)
+
+    async def one(promql: str) -> list[dict[str, Any]]:
+        try:
+            return await client.query_range(promql, start, end, step="5m")
+        except Exception:
+            return []
+
+    rx, tx = await asyncio.gather(one(Q_BANDWIDTH_RX_RANGE), one(Q_BANDWIDTH_TX_RANGE))
+    return {"rx": _to_series(rx), "tx": _to_series(tx)}
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -43,13 +53,13 @@ async def dashboard(request: Request) -> HTMLResponse:
     client: PrometheusClient = request.app.state.prom
     settings = request.app.state.settings
 
-    initial_bandwidth: list[tuple[str, float]] = []
+    initial_bandwidth: dict[str, list[dict[str, Any]]] = {"rx": [], "tx": []}
     prom_ok = True
     try:
         if not await client.health():
             prom_ok = False
         else:
-            initial_bandwidth = await _bandwidth_series(client)
+            initial_bandwidth = await _network_trend(client)
     except Exception:
         prom_ok = False
 
@@ -63,8 +73,6 @@ async def dashboard(request: Request) -> HTMLResponse:
             "prometheus_url": settings.prometheus_url,
             "cards_refresh_s": settings.cards_refresh_s,
             "charts_refresh_s": settings.charts_refresh_s,
-            "initial_bandwidth": [
-                {"time": t, "value": v} for t, v in initial_bandwidth
-            ],
+            "initial_bandwidth": initial_bandwidth,
         },
     )

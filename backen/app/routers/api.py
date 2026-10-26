@@ -17,15 +17,18 @@ from fastapi.responses import JSONResponse
 from app.prometheus.client import PrometheusClient
 from app.prometheus.queries import (
     FLOPS_PRECISIONS,
-    Q_BANDWIDTH_RANGE,
+    Q_BANDWIDTH_RX_RANGE,
+    Q_BANDWIDTH_TX_RANGE,
     Q_CPU_CORES,
     Q_EVENTS,
     Q_HOSTS,
     Q_LINKS,
+    Q_LINKS_BANDWIDTH,
     Q_LINKS_LOSS,
     Q_LINKS_QUALITY,
     Q_MEMORY_TOTAL,
     Q_PACKET_IN,
+    Q_RULES_ACTIVE,
     Q_SWITCHES,
     q_cluster_cpu_cores,
     q_cluster_cpu_flops_peak,
@@ -274,31 +277,52 @@ async def overview(request: Request) -> JSONResponse:
     return cache_response(payload, max_age=request.app.state.settings.cards_cache_s)
 
 
+async def _safe_range(
+    request: Request, promql: str, start: datetime, end: datetime, step: str,
+) -> list[dict[str, Any]]:
+    """query_range 的异常兜底版本，与 `_safe_query` 同思路：失败返回空列表。"""
+    try:
+        return await _client(request).query_range(promql, start, end, step=step)
+    except Exception:
+        return []
+
+
+def _range_to_series(rows: list[dict[str, Any]], digits: int) -> list[dict[str, Any]]:
+    """query_range 结果 → [{time: 'HH:MM', value}, ...]。
+
+    多条 series（多网卡/多链路）时取首条——聚合已在 PromQL 侧用 sum/avg 完成，
+    这里正常只会拿到一条。
+    """
+    if not rows:
+        return []
+    out: list[dict[str, Any]] = []
+    for ts, v in rows[0].get("values", []):
+        try:
+            out.append({
+                "time": datetime.fromtimestamp(float(ts)).strftime("%H:%M"),
+                "value": round(float(v), digits),
+            })
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
 @router.get("/bandwidth")
 async def bandwidth(request: Request) -> JSONResponse:
-    """24h 带宽趋势（5m 步进）。"""
+    """24h 带宽趋势（5m 步进）：入向 / 出向两个方向的真实 rate。
+
+    链路时延不在这张图里——它量级与带宽差几个数量级，压在一根轴上只会变成贴底的
+    直线；时延改由 /api/metrics/qos 的 QoS 雷达呈现。
+    """
     end = datetime.now()
     start = end - timedelta(hours=24)
-    try:
-        results = await _client(request).query_range(
-            Q_BANDWIDTH_RANGE, start, end, step="5m",
-        )
-    except Exception:
-        results = []
-
-    series: list[dict[str, float | str]] = []
-    if results:
-        for ts, v in results[0].get("values", []):
-            try:
-                series.append({
-                    "time": datetime.fromtimestamp(float(ts)).strftime("%H:%M"),
-                    "value": round(float(v), 2),
-                })
-            except (ValueError, TypeError):
-                continue
+    rx_r, tx_r = await asyncio.gather(
+        _safe_range(request, Q_BANDWIDTH_RX_RANGE, start, end, "5m"),
+        _safe_range(request, Q_BANDWIDTH_TX_RANGE, start, end, "5m"),
+    )
 
     return cache_response(
-        {"series": series, "unit": "Mbps"},
+        {"rx": _range_to_series(rx_r, 2), "tx": _range_to_series(tx_r, 2)},
         max_age=request.app.state.settings.charts_cache_s,
     )
 
@@ -423,6 +447,82 @@ async def links_quality(request: Request) -> JSONResponse:
         {"items": list(links.values())},
         max_age=request.app.state.settings.charts_cache_s,
     )
+
+
+@router.get("/qos")
+async def qos_score(request: Request) -> JSONResponse:
+    """网络 QoS 六维评分：全部由 QoSController 的真实指标推导。
+
+    评分口径统一为「0~100，越高越好」，阈值来自经验值而非标准，注释里写明依据。
+
+    每个维度带 `measured` 标志：True 表示有真实指标支撑，False 表示该指标
+    目前不存在、值是占位。前端据此在图例上标注，避免占位分被当成实测结果。
+    """
+    delay_rows, loss_rows, bw_rows, sw_rows, rule_rows = await asyncio.gather(
+        _safe_query(request, Q_LINKS_QUALITY),
+        _safe_query(request, Q_LINKS_LOSS),
+        _safe_query(request, Q_LINKS_BANDWIDTH),
+        _safe_query(request, Q_SWITCHES),
+        _safe_query(request, Q_RULES_ACTIVE),
+    )
+
+    delays = [v for v in (_scalar([r]) for r in delay_rows) if v is not None]
+    losses = [v for v in (_scalar([r]) for r in loss_rows) if v is not None]
+
+    # 时延：线性扣分，0ms 满分、50ms 归零。实测均值 4.8ms / 峰值 22ms。
+    avg_delay = sum(delays) / len(delays) if delays else None
+    # 抖动用同批链路时延的离散度（标准差）代理——控制器没导出真抖动指标，
+    # 但各链路时延本就该在同一量级，离散度越大说明时延越不稳。
+    delay_std = (
+        (sum((d - avg_delay) ** 2 for d in delays) / len(delays)) ** 0.5
+        if avg_delay is not None and len(delays) > 1
+        else None
+    )
+    avg_loss = sum(losses) / len(losses) if losses else None
+    # qos_link_bandwidth_usage_bits 是 bit/s，评分按 Mbps 口径（换算 ÷1e6）
+    bandwidth_mbps = None if (bw := _scalar(bw_rows)) is None else bw / 1e6
+    switch_total = _scalar(sw_rows)
+    rules_active = _scalar(rule_rows)
+    rated_mbps = request.app.state.settings.network_rated_mbps
+
+    def _lin(v: float | None, zero_at: float) -> float | None:
+        """越高越好：v=0 满分，v≥zero_at 归零。"""
+        return None if v is None else round(max(0.0, min(100.0, 100.0 * (1 - v / zero_at))), 1)
+
+    dims = [
+        {"key": "latency", "label": "时延",
+         "score": _lin(avg_delay, 50.0), "measured": avg_delay is not None,
+         "detail": f"均值 {avg_delay:.1f} ms" if avg_delay is not None else "无数据"},
+        {"key": "jitter", "label": "抖动",
+         "score": _lin(delay_std, 20.0), "measured": delay_std is not None,
+         "detail": f"时延标准差 {delay_std:.1f} ms" if delay_std is not None else "无数据"},
+        {"key": "loss", "label": "丢包率",
+         "score": _lin(avg_loss, 5.0), "measured": avg_loss is not None,
+         "detail": f"均值 {avg_loss:.2f} %" if avg_loss is not None else "无数据"},
+        # 控制器活着 = 链路可用。target 数拿不到（ofctl_rest 未加载），
+        # 故只按交换机数量是否上报来判断，不编造具体百分比。
+        {"key": "availability", "label": "可用性",
+         "score": 100.0 if switch_total else 0.0, "measured": switch_total is not None,
+         "detail": f"交换机 {int(switch_total)} 台在线" if switch_total else "无数据"},
+        # 带宽余量 = 1 - 占用/额定。额定值取 Settings.network_rated_mbps
+        # （默认 1000 Mbps，环境变量 NETWORK_RATED_MBPS 可覆盖）——
+        # 控制器只上报占用、不含链路速率，没有这个基准就算不出余量。
+        # 占用超过额定时线性扣到 0，不出现负分。
+        {"key": "bandwidth", "label": "带宽余量",
+         "score": None if bandwidth_mbps is None else
+             round(max(0.0, min(100.0, 100.0 * (1 - bandwidth_mbps / rated_mbps))), 1),
+         "measured": bandwidth_mbps is not None,
+         "detail": f"占用 {bandwidth_mbps:.2f} / 额定 {rated_mbps:.0f} Mbps"
+                   if bandwidth_mbps is not None else "无数据"},
+        # 安全性没有对应指标（DSCP 策略数 qos_rules_active 可作侧面佐证），
+        # 这里明确标为未采集，不给编造分。
+        {"key": "security", "label": "安全性",
+         "score": None, "measured": False,
+         "detail": f"暂无指标采集（已下发 QoS 规则 {int(rules_active)} 条）"
+                   if rules_active is not None else "暂无指标采集"},
+    ]
+
+    return cache_response({"dimensions": dims}, max_age=request.app.state.settings.cards_cache_s)
 
 
 @router.get("/events")
