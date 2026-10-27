@@ -1,0 +1,43 @@
+# CPQS 部署排除规则
+#
+# 规则语法：
+#   * 一行一个模式，空行和 # 开头的行会被忽略；
+#   * 不带 / 的模式匹配任意层级上的同名文件或目录，例如 __pycache__；
+#   * 带 / 的模式从源目录根开始匹配，例如 docs/build；
+#   * 结尾带 / 表示只匹配目录；
+#   * 暂不支持 ! 取反规则。
+#
+# 内置始终排除：.git / .svn / .hg，以及部署工具目录本身。
+# 项目根目录下如果也有 .deployignore，会与本文件叠加。
+
+# IDE / 编辑器
+.idea/
+.vscode/
+.claude/
+
+# Python 缓存与虚拟环境
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 前端依赖
+node_modules/
+
+# 系统临时文件与日志
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.swp
+*~
+
+# 部署工具自身
+deploy-tool/
