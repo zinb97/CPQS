@@ -901,7 +901,7 @@ async def host_timeseries(instance: str, request: Request, window: str = "30m") 
     ]
 
     raw = await asyncio.gather(
-        *(cli.query_range(pql, start, end, step="30s") for _, pql, _ in metric_specs),
+        *(cli.query_range(pql, start, end, step=step) for _, pql, _ in metric_specs),
         return_exceptions=True,
     )
 

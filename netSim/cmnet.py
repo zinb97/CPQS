@@ -296,9 +296,13 @@ class CMNetTopo(Topo):
                 current = nxt
 
             # 末层挂主机
+            # 每省独占 10.1.{prov_idx}.0/24：不能把省号与位号直接拼进最后一个
+            # 八位组（原写法 10.0.3.{prov}{i:02d} 在第 3 个省就生成 10.0.3.301，
+            # 超出 0~255，Mininet 配置地址时直接失败），也不能让所有省共用
+            # 10.0.3.0/24（跨省主机落在同一二层域，与省-城域层级矛盾）。
             for i, sw_name in enumerate(current, start=1):
                 host_name = self.addHost(
-                    f'hm{prov_idx}{i}', ip=f'10.0.3.{prov_idx}{i:02d}/24'
+                    f'hm{prov_idx}{i}', ip=f'10.1.{prov_idx}.{i}/24'
                 )
                 self.addLink(sw_name, host_name)
                 self.metro.append((prov_idx, sw_name))
