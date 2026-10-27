@@ -77,13 +77,20 @@ def _flops_map(*pairs: tuple[list[dict[str, Any]], str] | None) -> dict[str, flo
     传入 None 表示该口径在本次查询中没有数据（例如主机无 GPU）。
     结果**按行求和**：`sum by(cluster)` 会按集群返回多条 series，只取第一条
     等于只算了一个集群，会让「总算力」在多集群下凭空缩水。
+
+    `result` 也可能是 `asyncio.gather(..., return_exceptions=True)` 带回的
+    Exception 实例（查询失败时）。Exception 本身是 truthy，`result or []`
+    拦不住它，直接迭代会抛 TypeError 并让整个端点返回 500 —— 所以这里
+    先做 isinstance 检查，把失败视作「该口径无数据」。
     """
     out: dict[str, float] = {}
     for item in pairs:
         if item is None:
             continue
         result, precision = item
-        total = sum(v for v in (_scalar([r]) for r in result or []) if v is not None)
+        if not isinstance(result, list):
+            continue
+        total = sum(v for v in (_scalar([r]) for r in result) if v is not None)
         if total:
             out[precision] = total
     return out

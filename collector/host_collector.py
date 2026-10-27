@@ -622,7 +622,12 @@ class HostCollector:
             if isinstance(vals, dict):
                 for k, v in vals.items():
                     lines.append(f'node_sockstat_{proto}_{k} {v}')
-        lines.append(f'node_netstat_Tcp_CurrEstab {sockstat.get("TCP", {}).get("inuse", 0)}')
+        # 注意：不要在这里再发 node_netstat_Tcp_CurrEstab。
+        # /proc/net/netstat 的 Tcp: 行已含 CurrEstab 字段，由 _emit_proto_flat
+        # 以 'node_netstat' 前缀发出（见 to_prometheus 中该调用）。
+        # 两条路径发同名同标签集的 series 会违反 Prometheus 曝光格式的
+        # 「同一标签集不得重复出现」，导致整次抓取被拒、该 target 全部指标丢失。
+        # sockstat 口径的 TCP inuse 已由上面的 node_sockstat_TCP_inuse 覆盖。
 
     @staticmethod
     def _emit_diskstats(lines, diskstats):

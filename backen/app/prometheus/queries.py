@@ -11,7 +11,7 @@ import yaml
 # 集群数 / 总节点数 / 在线节点数 由 `/api/v1/targets` 推导（PrometheusClient.targets），
 # 不再用 PromQL（up{job=~"node-.*"} 系列）。
 Q_CPU_CORES = "sum(node_cpu_cores)"
-Q_MEMORY_TOTAL = "sum(node_memory_MemTotal_bytes{})"
+Q_MEMORY_TOTAL = "sum(node_memory_MemTotal_bytes)"
 Q_SWITCHES = "qos_switches_count"
 Q_LINKS = "qos_links_count"
 Q_HOSTS = "qos_hosts_count"

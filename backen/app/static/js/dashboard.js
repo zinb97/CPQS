@@ -397,6 +397,13 @@
         mapChart.setOption(buildMapOption(), true);
         renderComputeList();
         renderNodePills();
+        // 资源环图的数据源也是 allClusters，而它在 initResourceChart() 首屏
+        // 渲染时还是空数组（initMap 里 await china.json 让出了事件循环，
+        // 资源图先于地图数据完成首绘）。这里数据到位后立刻重绘一次，
+        // 否则同一屏上饼图空着、右侧列表却已有数据，且要等 30s 轮询才更新。
+        if (resourceChart && resourceChart._raw) {
+          resourceChart._raw();
+        }
       } catch (e) {
         console.error('地图数据加载失败:', e);
       }
@@ -434,8 +441,19 @@
       });
       const data = Object.entries(byRegion).map(([name, value]) => ({ name, value }));
       if (!data.length) {
-        el.innerHTML = '<div class="ds-empty">暂无集群数据</div>';
-        resourceChart.clear();
+        // 空态不能用 el.innerHTML 覆盖：ECharts 的图表容器是 el 的子节点，
+        // innerHTML 赋值会把它连同 canvas 一起从文档里摘掉，此后 setOption
+        // 画到的是游离节点，页面上永远看不到图（数据后来到位也救不回来）。
+        // 改用 ECharts 自己的 graphic 画占位文字，图表容器始终保持挂载。
+        resourceChart.setOption({
+          graphic: [{
+            type: 'text',
+            left: 'center',
+            top: 'middle',
+            style: { text: '暂无集群数据', fill: '#5a7194', fontSize: 12 },
+          }],
+          series: [],
+        }, true);
         return;
       }
       const palette = ['#00e5ff', '#00ff9d', '#b388ff', '#ffb347', '#ff5577', '#1a8a9c'];
@@ -467,11 +485,12 @@
             itemStyle: { color: palette[i % palette.length] },
           })),
         }],
-      });
+      }, true);
     };
     render();
     setInterval(render, CHARTS_MS);
-    // 暴露给地图刷新时同步
+    // 暴露给地图刷新时同步：地图数据到达后 allClusters 才从空数组变成真实
+    // 集群，此时调用一次即可立刻重绘资源环图，不必等 30s 的轮询。
     resourceChart._raw = render;
   }
 
@@ -491,8 +510,18 @@
       const tx = (payload && payload.tx) || [];
       const times = rx.length ? rx.map((d) => d.time) : tx.map((d) => d.time);
       if (!times.length) {
-        el.innerHTML = '<div class="ds-empty">暂无流量数据</div>';
-        trafficChart.clear();
+        // 同上：不能用 el.innerHTML 覆盖，否则 ECharts 的图表容器连同 canvas
+        // 被从文档里摘掉，之后即使 Prometheus 恢复、setOption 也画到游离节点，
+        // 页面上的图永远出不来。改用 graphic 画占位文字。
+        trafficChart.setOption({
+          graphic: [{
+            type: 'text',
+            left: 'center',
+            top: 'middle',
+            style: { text: '暂无流量数据', fill: '#5a7194', fontSize: 12 },
+          }],
+          series: [],
+        }, true);
         return;
       }
       xData.length = 0;
@@ -553,7 +582,7 @@
             data: txData,
           },
         ],
-      });
+      }, true);
     }
 
     render(CONFIG.initialBandwidth);
