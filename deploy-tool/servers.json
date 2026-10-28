@@ -44,6 +44,20 @@
       "user": "xfusion"
     },
     {
+      "name": "X6",
+      "group": "xfusion",
+      "host": "S501.site",
+      "port": 1016,
+      "user": "xfusion"
+    },
+    {
+      "name": "X7",
+      "group": "xfusion",
+      "host": "S501.site",
+      "port": 1016,
+      "user": "xfusion"
+    },
+    {
       "name": "L1",
       "group": "hello",
       "host": "S501.site",

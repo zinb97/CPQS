@@ -1,0 +1,57 @@
+# 全局配置
+global:
+  scrape_interval: 15s      # 采集间隔
+  evaluation_interval: 15s  # 规则评估间隔
+  scrape_timeout: 10s       # 采集超时时间
+
+# 告警规则文件路径
+rule_files:
+  # - "rules/*.yml"
+
+# 采集任务配置
+scrape_configs:
+  # 采集 Prometheus 自身指标
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["192.168.10.31:9090"]
+
+  - job_name: "ryu-controller"
+    static_configs:
+      - targets: ["192.168.10.31:8080"]
+
+  - job_name: 'node-keda-cluster'
+    static_configs:
+      - targets:
+          - '101.34.209.104:9111'
+          - '101.34.209.104:9115'
+          - '192.168.10.31:9100'
+        labels:
+          cluster: 'keda'
+          location: "changsha"
+
+  - job_name: 'node-changsha-cluster'
+    static_configs:
+      - targets:
+          - '101.34.209.104:9112'
+          - '101.34.209.104:9113'
+        labels:
+          cluster: 'changsha'
+          location: "changsha"
+
+  - job_name: 'node-zhuzhou-cluster'
+    static_configs:
+      - targets:
+          - '101.34.209.104:9122'
+          - '101.34.209.104:9123'
+        labels:
+          cluster: 'zhuzhou'
+          location: "zhuzhou"
+
+  - job_name: 'node-shenyang-cluster'
+    static_configs:
+      - targets:
+          - '101.34.209.104:9114'
+          - '101.34.209.104:9124'
+        labels:
+          cluster: 'shenyang'
+          location: "shenyang"
