@@ -70,7 +70,7 @@
       <table class="nodes-table" id="nodesTable">
         <thead>
           <tr>
-            <th>地址</th>
+            <th>主机</th>
             <th>状态</th>
             <th>CPU</th>
             <th>内存</th>
@@ -184,6 +184,22 @@
     height: 100%;
     background: var(--color-accent);
   }
+  /* 主机名为主标识（端口映射下同 IP 多台机器靠它区分），地址为副标识 */
+  .node-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .node-cell__name {
+    font-weight: 600;
+    color: var(--color-text-primary);
+    font-family: var(--font-sans, inherit);
+    font-size: 13px;
+  }
+  .node-cell__addr {
+    font-size: 10px;
+    color: var(--color-text-muted);
+  }
 </style>
 {% endblock %}
 
@@ -192,6 +208,10 @@
   const CLUSTER_ID = {{ cluster_id | tojson }};
   const STATUS_LABEL = { healthy: '运行中', warning: '部分离线', offline: '离线', unknown: '未知' };
   const STATUS_CLASS = { healthy: 'status--healthy', warning: 'status--warning', offline: 'status--offline', unknown: 'status--offline' };
+  // 节点表的 health 是 Prometheus 抓取目标状态（up/down），与上面的集群状态
+  // 不是一套取值，需要单独的映射，否则节点恒显示成灰色的原始英文。
+  const HEALTH_LABEL = { up: '运行中', down: '离线', unknown: '未知' };
+  const HEALTH_CLASS = { up: 'status--healthy', down: 'status--offline', unknown: 'status--offline' };
 
   function fmtBytes(n) {
     if (n == null) return '—';
@@ -243,13 +263,18 @@
     tbody.innerHTML = nodes.map((n) => {
       const health = n.health || 'unknown';
       const memWidth = n.mem_usage != null ? Math.min(100, n.mem_usage) : 0;
-      const addr = (n.instance || '—').replace(/:\d+$/, '');
+      const addr = (n.instance || '—');
+      // 端口映射下多台服务器共用同一 IP，只显示 IP 无法分辨；主机名做主标识。
+      const name = n.hostname || '';
+      const addrCell = name
+        ? `<div class="node-cell"><span class="node-cell__name">${name}</span><span class="node-cell__addr">${addr}</span></div>`
+        : `<div class="node-cell"><span class="node-cell__addr">${addr}</span></div>`;
       const gpuCell = n.gpu_count > 0
         ? `<strong>${n.gpu_count}</strong> 卡<br><span style="font-size:10px;color:var(--color-text-muted);">${n.gpu_util == null ? '—' : n.gpu_util.toFixed(0) + '%'}${n.gpu_max_temp_c != null ? ' · ' + n.gpu_max_temp_c.toFixed(0) + '°C' : ''}</span>`
         : '<span style="color:var(--color-text-muted);">—</span>';
       return `<tr data-instance="${n.instance}">
-        <td>${addr}</td>
-        <td><span class="status ${STATUS_CLASS[health] || 'status--offline'}">${STATUS_LABEL[health] || health}</span></td>
+        <td>${addrCell}</td>
+        <td><span class="status ${HEALTH_CLASS[health] || 'status--offline'}">${HEALTH_LABEL[health] || health}</span></td>
         <td>${pct(n.cpu_usage)}</td>
         <td>
           <div class="mem-cell">
@@ -268,8 +293,8 @@
     }).join('');
     tbody.querySelectorAll('tr[data-instance]').forEach((tr) => {
       tr.addEventListener('click', () => {
-        // URL 用裸 IP，后端按 /api/v1/targets 补全成带端口的 instance 标签
-        const inst = (tr.dataset.instance || '').replace(/:\d+$/, '');
+        // 必须带端口：所有服务器共用同一 IP，只有 ip:port 才能唯一定位一台机器
+        const inst = tr.dataset.instance || '';
         if (inst) location.href = '/resource/hosts/' + encodeURIComponent(inst);
       });
     });

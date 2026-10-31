@@ -179,14 +179,35 @@ async def _safe_query(request: Request, promql: str) -> list[dict[str, Any]]:
         return []
 
 
+def _match_instance_by_ip(targets: list[dict[str, Any]], ip: str) -> str:
+    """在 targets 里按 IP 找回带端口的 instance 标签。
+
+    端口映射场景下同一个 IP 下挂着多台服务器（instance 形如 ip:9111），
+    裸 IP 本身是有歧义的：优先返回在线（health == "up"）的那台，
+    都不在线时退回第一个匹配项。
+    """
+    fallback = ""
+    for t in targets:
+        inst = (t.get("labels") or {}).get("instance") or ""
+        if inst.rsplit(":", 1)[0] != ip:
+            continue
+        if t.get("health") == "up":
+            return inst
+        if not fallback:
+            fallback = inst
+    return fallback
+
+
 async def _resolve_instance(request: Request, instance: str) -> str:
     """把 URL 里的裸主机名/IP 补全成 Prometheus 的 instance 标签。
 
-    页面 URL 用裸 IP 更干净（/resource/hosts/192.168.10.31），但 scrape config
-    产生的 instance 标签带端口（192.168.10.31:9100），PromQL 必须匹配完整标签。
+    scrape config 产生的 instance 标签带端口（192.168.10.31:9100），
+    PromQL 必须匹配完整标签。
 
-    带端口的入参直接透传；裸 IP 走 `/api/v1/targets` 反查，多个端口命中时取第一个。
-    查不到就原样返回，让查询自然返回空、前端走「主机不存在」空状态。
+    带端口的入参直接透传（页面上已按 ip:port 链接，端口映射下这是唯一
+    无歧义的主机标识）；裸 IP 走 `/api/v1/targets` 反查，同 IP 多端口时
+    优先取在线的那台。查不到就原样返回，让查询自然返回空、
+    前端走「主机不存在」空状态。
     """
     if not instance or ":" in instance:
         return instance
@@ -194,11 +215,7 @@ async def _resolve_instance(request: Request, instance: str) -> str:
         targets = await _client(request).targets()
     except Exception:
         return instance
-    for t in targets:
-        inst = (t.get("labels") or {}).get("instance") or ""
-        if inst.rsplit(":", 1)[0] == instance:
-            return inst
-    return instance
+    return _match_instance_by_ip(targets, instance) or instance
 
 
 def _summarize_targets(targets: list[dict[str, Any]]) -> tuple[int, int, int]:
@@ -567,6 +584,35 @@ async def _list_node_targets(request: Request) -> list[dict[str, Any]]:
     return [t for t in targets if (t.get("labels") or {}).get("job", "").startswith("node-")]
 
 
+async def _node_hostnames(
+    request: Request, instances: list[str] | None = None
+) -> dict[str, str]:
+    """instance(ip:port) → 主机名。
+
+    本项目所有服务器都挂在同一批 IP 上，靠端口映射区分（instance 形如
+    `101.34.209.104:9111`），界面若只显示 IP，同一 IP 下的多台机器长得
+    一模一样。主机名来自采集器上报的 `node_uname_info{nodename=...}`，
+    是同 IP 不同端口之间唯一稳定的区分标识。
+
+    一次查询取回全部 `node_uname_info` series（每个 exporter 目标一条），
+    再按 instance 过滤，避免逐台查询（N 次 HTTP 请求）。
+    `instances` 为 None 时返回全部映射。
+    """
+    rows = await _safe_query(request, "node_uname_info")
+    wanted = set(instances) if instances is not None else None
+    out: dict[str, str] = {}
+    for r in rows:
+        metric = r.get("metric") or {}
+        inst = metric.get("instance")
+        name = metric.get("nodename")
+        if not inst or not name:
+            continue
+        if wanted is not None and inst not in wanted:
+            continue
+        out[inst] = name
+    return out
+
+
 async def _cluster_flops(request: Request) -> dict[str, dict[str, dict[str, float]]]:
     """全部集群的峰值算力 → {cluster_id: {"cpu": {...}, "gpu": {...}}}。
 
@@ -633,6 +679,19 @@ async def clusters(request: Request) -> JSONResponse:
         if t.get("health") == "up":
             online_by_cluster[cid] = online_by_cluster.get(cid, 0) + 1
 
+    # 各集群节点的主机名：端口映射下多台服务器共用同一 IP，主机名是唯一能区分
+    # 同集群内不同节点的标识（集群列表里光看 IP 只会看到一堆重复地址）。
+    all_hostnames = await _node_hostnames(
+        request, [(t.get("labels") or {}).get("instance", "") for t in node_targets]
+    )
+    hostnames_by_cluster: dict[str, list[str]] = {}
+    for t in node_targets:
+        labels = t.get("labels") or {}
+        cid = labels.get("cluster", "")
+        name = all_hostnames.get(labels.get("instance", ""))
+        if cid and name:
+            hostnames_by_cluster.setdefault(cid, []).append(name)
+
     # 并发拉取每个集群的聚合指标（无集群则跳过）
     cids = list(cluster_meta.keys())
     prom_results = await asyncio.gather(
@@ -692,6 +751,8 @@ async def clusters(request: Request) -> JSONResponse:
             "location": meta.get("location", [0, 0]),
             "online_nodes": online,
             "total_nodes": total,
+            # 节点主机名列表（界面按主机名区分同 IP 的不同服务器）
+            "node_hostnames": sorted(hostnames_by_cluster.get(cid, [])),
             "status": status,
             "cpu_usage": _round_pct(cpu_usage),
             "mem_usage": _round_pct(mem_usage),
@@ -731,6 +792,9 @@ async def cluster_detail(cluster_id: str, request: Request) -> JSONResponse:
             "last_scrape": t.get("lastScrape"),
             "last_error": t.get("lastError"),
         })
+
+    # 主机名：端口映射下同 IP 多台服务器，界面靠它区分（instance 只显示 IP 会重复）
+    hostnames = await _node_hostnames(request, [n["instance"] for n in cluster_nodes])
 
     # 并发查询：本集群聚合 + 每节点 6 个指标
     agg_results = await asyncio.gather(
@@ -805,6 +869,7 @@ async def cluster_detail(cluster_id: str, request: Request) -> JSONResponse:
 
         n_out = dict(n)
         n_out.update({
+            "hostname": hostnames.get(n["instance"], ""),
             "cpu_usage": _round_pct(cpu),
             "load1": _round(load1, 2),
             "mem_total_bytes": int(mem_total) if mem_total is not None else None,
@@ -978,18 +1043,10 @@ async def host_detail(instance: str, request: Request) -> JSONResponse:
     cluster_meta: dict[str, dict[str, Any]] = request.app.state.cluster_meta
     node_targets = await _list_node_targets(request)
 
-    # URL 传的是裸 IP（/resource/hosts/192.168.10.31），instance 标签带端口，
-    # 这里复用已取到的 targets 列表补全，不额外发请求。
+    # URL 可能是裸 IP（旧链接），instance 标签带端口，这里复用已取到的
+    # targets 列表补全，不额外发请求。端口映射下同 IP 多台机器，优先取在线的。
     if instance and ":" not in instance:
-        instance = next(
-            (
-                (t.get("labels") or {}).get("instance")
-                for t in node_targets
-                if ((t.get("labels") or {}).get("instance") or "").rsplit(":", 1)[0]
-                == instance
-            ),
-            instance,
-        )
+        instance = _match_instance_by_ip(node_targets, instance) or instance
 
     target = next(
         (
@@ -1062,8 +1119,27 @@ async def host_detail(instance: str, request: Request) -> JSONResponse:
     # gather 带 return_exceptions，异常会以 BaseException 对象回来，这里退回空结构
     hf = host_flops if isinstance(host_flops, dict) else {"cpu": {}, "gpu": {}}
 
+    uname_map = _info(uname_info)
+
+    # 同集群其他主机（用于下拉框切换）。按 instance 排序。
+    cluster_host_rows = [
+        {
+            "instance": (t.get("labels") or {}).get("instance", ""),
+            "health": t.get("health") or "unknown",
+        }
+        for t in node_targets
+        if (t.get("labels") or {}).get("cluster") == cid
+        and (t.get("labels") or {}).get("instance")
+    ]
+    # 主机名：端口映射下同 IP 多台服务器，下拉框只显示 IP 会分不清
+    cluster_hostnames = await _node_hostnames(
+        request, [h["instance"] for h in cluster_host_rows]
+    )
+
     payload = {
         "instance": instance,
+        # 主机名来自 node_uname_info{nodename=...}，同 IP 不同端口下用它区分
+        "hostname": uname_map.get("nodename", ""),
         "job": labels.get("job", ""),
         "cluster_id": cid,
         "cluster_name": cluster.get("name", cid),
@@ -1112,7 +1188,7 @@ async def host_detail(instance: str, request: Request) -> JSONResponse:
 
         # 系统信息
         "cpu_info": _info(cpu_info),
-        "uname": _info(uname_info),
+        "uname": uname_map,
         "os": _info(os_info),
         "dmi": _info(dmi_info),
 
@@ -1123,12 +1199,11 @@ async def host_detail(instance: str, request: Request) -> JSONResponse:
         "cluster_hosts": sorted(
             [
                 {
-                    "instance": (t.get("labels") or {}).get("instance", ""),
-                    "health": t.get("health") or "unknown",
+                    "instance": h["instance"],
+                    "hostname": cluster_hostnames.get(h["instance"], ""),
+                    "health": h["health"],
                 }
-                for t in node_targets
-                if (t.get("labels") or {}).get("cluster") == cid
-                and (t.get("labels") or {}).get("instance")
+                for h in cluster_host_rows
             ],
             key=lambda x: x["instance"],
         ),

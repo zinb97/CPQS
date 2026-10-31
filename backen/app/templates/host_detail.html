@@ -113,6 +113,7 @@
       <div class="panel__title">抓取与系统信息</div>
       <dl class="host-info" id="hostInfo">
         <div><dt>所属集群</dt><dd id="iCluster">—</dd></div>
+        <div><dt>主机名</dt><dd id="iHostname">—</dd></div>
         <div><dt>Prometheus 地址</dt><dd id="iInstance">{{ instance }}</dd></div>
         <div><dt>抓取任务</dt><dd id="iJob">—</dd></div>
         <div><dt>区域</dt><dd id="iRegion">—</dd></div>
@@ -264,8 +265,9 @@
 {% block extra_scripts %}
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js" crossorigin="anonymous"></script>
 <script>
-  // URL 里是裸 IP（可能仍带 :port 的旧链接），统一去掉端口后再比对和拼 URL。
-  const INSTANCE = {{ instance | tojson }}.replace(/:\d+$/, '');
+  // URL 里带 ip:port：所有服务器共用同一 IP，只有端口能唯一定位一台机器，
+  // 去掉端口会导致跳到同 IP 的另一台主机。
+  const INSTANCE = {{ instance | tojson }};
   const STATUS_LABEL = { healthy: '运行中', warning: '部分离线', offline: '离线', unknown: '未知' };
   const STATUS_CLASS = { healthy: 'status--healthy', warning: 'status--warning', offline: 'status--offline', unknown: 'status--offline' };
 
@@ -498,12 +500,14 @@
   }
 
   // 用主机详情响应里的 cluster_hosts 填充下拉框（仅当前集群成员）。
+  // 端口映射下多台服务器共用同一 IP，选项按主机名区分，地址带端口作为副标识。
   function renderHostSwitcher(clusterHosts) {
     const sel = document.getElementById('hostSelect');
     const opts = [];
     (clusterHosts || []).forEach((h) => {
-      const label = (h.instance || '').replace(/:\d+$/, '');
-      const selAttr = label === INSTANCE ? ' selected' : '';
+      const name = h.hostname || '';
+      const label = name ? `${name}（${h.instance || ''}）` : (h.instance || '');
+      const selAttr = h.instance === INSTANCE ? ' selected' : '';
       const offlineTag = h.health === 'up' ? '' : ' （离线）';
       opts.push(`<option value="${h.instance}"${selAttr}>${label}${offlineTag}</option>`);
     });
@@ -511,12 +515,12 @@
   }
 
   function renderDetail(d) {
-    // 标题按「主机名（IP）」展示。nodename 来自 platform.uname()，容器里可能是
-    // 随机 ID，与 IP 相同时也无额外信息量，两种情况都退化为只显示 IP。
-    const hostIp = (d.instance || '').replace(/:\d+$/, '');
-    const hostName = (d.uname && d.uname.nodename) || '';
+    // 标题按「主机名（ip:port）」展示。主机名来自 node_uname_info 的 nodename，
+    // 是端口映射场景下区分同 IP 不同机器的唯一标识；拿不到时退回地址。
+    const hostInst = d.instance || '';
+    const hostName = d.hostname || (d.uname && d.uname.nodename) || '';
     document.getElementById('hostTitle').textContent =
-      (hostName && hostName !== hostIp) ? `${hostName}（${hostIp}）` : hostIp;
+      hostName ? `${hostName}（${hostInst}）` : hostInst;
     setText('mCpuCores', d.cpu_cores != null ? d.cpu_cores + ' 核' : '—');
     setText('mMemTot', fmtBytes(d.mem_total_bytes));
     setText('mDiskTot', d.disk_total_bytes != null ? fmtBytes(d.disk_total_bytes) : '—');
@@ -546,6 +550,7 @@
     }
 
     setText('iCluster', d.cluster_name || d.cluster_id || '—');
+    setText('iHostname', d.hostname || (d.uname && d.uname.nodename) || '—');
     setText('iJob', d.job);
     setText('iRegion', d.region || '—');
     setText('iProvince', d.province || '—');
@@ -628,8 +633,8 @@
 
   // 主机切换：跳转到新主机的详情页（让服务端重新渲染模板最简单）
   document.getElementById('hostSelect').addEventListener('change', (e) => {
-    // URL 用裸 IP，后端按 /api/v1/targets 补全成带端口的 instance 标签
-    const v = (e.target.value || '').replace(/:\d+$/, '');
+    // 保留 ip:port：同 IP 的多台服务器只能靠端口区分
+    const v = e.target.value || '';
     if (v && v !== INSTANCE) {
       location.href = '/resource/hosts/' + encodeURIComponent(v);
     }

@@ -130,6 +130,16 @@
     color: var(--color-text-muted);
     font-size: 11px;
   }
+  /* 节点主机名：端口映射下多台服务器共用同一 IP，主机名是唯一区分标识 */
+  .nodes-cell__hosts {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    font-family: var(--font-sans, inherit);
+    max-width: 240px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .usage-cell {
     display: grid;
     grid-template-columns: 60px 1fr;
@@ -223,6 +233,11 @@
 
   function renderRow(c) {
     const status = c.status || 'unknown';
+    // 节点主机名：端口映射下同 IP 多台服务器，靠主机名区分（IP 会重复）
+    const hosts = c.node_hostnames || [];
+    const hostsCell = hosts.length
+      ? `<div class="nodes-cell__hosts" title="${hosts.join('、')}">${hosts.join('、')}</div>`
+      : '';
     return `<tr data-id="${c.id}">
       <td>
         <div class="cluster-name">
@@ -233,7 +248,7 @@
       <td><span class="status ${STATUS_CLASS[status] || 'status--offline'}">${STATUS_LABEL[status] || status}</span></td>
       <td style="font-family:var(--font-sans,inherit);">${c.region || '—'}</td>
       <td style="font-family:var(--font-sans,inherit);">${c.province || '—'}</td>
-      <td class="nodes-cell"><strong>${c.online_nodes ?? 0}</strong><span class="total">/ ${c.total_nodes ?? 0}</span></td>
+      <td class="nodes-cell"><strong>${c.online_nodes ?? 0}</strong><span class="total">/ ${c.total_nodes ?? 0}</span>${hostsCell}</td>
       <td>${plainCell(c.cpu_cores, ' 核')}</td>
       <td>${plainCell(c.mem_total_bytes != null ? fmtBytes(c.mem_total_bytes) : null)}</td>
       <td>${usageCell(c.cpu_usage)}</td>
