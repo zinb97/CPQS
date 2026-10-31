@@ -324,6 +324,7 @@
   };
   const CHARTS = {};   // id -> echarts instance
   let GPU_VISIBLE = false;  // 由 renderDetail 根据 gpu_count 设置
+  let LAST_TS = null;       // 最近一次时序数据：GPU 卡片显示后重放一次
 
   function baseOption(color) {
     return {
@@ -541,6 +542,9 @@
     // GPU 图表是在 hidden 容器上 init 的，宽度量到 0；显示后必须 resize 一次
     if (GPU_VISIBLE) {
       resizeAll();
+      // 时序数据先于详情到达时（并发请求，timeseries 更快），图表已在 hidden
+      // 状态下写入数据；这里重放一次，确保按显示后的真实宽度重绘。
+      if (LAST_TS) renderTimeseries(LAST_TS);
       setText('mGpuCount', d.gpu_count + ' 卡');
       // 同机异构卡会返回多项，用「+N 型号」提示还有别的型号
       const models = d.gpu_models || [];
@@ -595,6 +599,7 @@
 
   function renderTimeseries(ts) {
     if (!ts || !ts.series) return;
+    LAST_TS = ts;
     const s = ts.series;
     updateChart('chartCpu',     s.cpu_usage || []);
     updateChart('chartMem',     s.mem_usage || []);
@@ -605,11 +610,17 @@
       { name: '下行', points: s.net_rx || [] },
       { name: '上行', points: s.net_tx || [] },
     ]);
-    if (GPU_VISIBLE) {
-      updateChart('chartGpuUtil', s.gpu_util || []);
-      updateChart('chartGpuTemp', s.gpu_max_temp_c || []);
-      updateChart('chartGpuMem',  s.gpu_mem_used || []);
-    }
+    // GPU 三张图无条件写数据：图表在脚本解析时就已 init（即使容器还是 hidden），
+    // 数据存进 chart 实例，等容器显示 + resize 后自然画出来。
+    //
+    // 这里不能按 GPU_VISIBLE 跳过：页面加载时 refreshDetail() 与
+    // refreshTimeseries() 并发发出，而 timeseries 接口（11 条 range 查询）
+    // 比 detail 接口（约 28 条查询）快，实测 26ms vs 60ms —— 时序先到时
+    // GPU_VISIBLE 还是 false，数据会被整段丢弃，GPU 图表要等到下一个轮询
+    // 周期（10s）才出图。是否显示交给 renderDetail 控制。
+    updateChart('chartGpuUtil', s.gpu_util || []);
+    updateChart('chartGpuTemp', s.gpu_max_temp_c || []);
+    updateChart('chartGpuMem',  s.gpu_mem_used || []);
   }
 
   async function refreshDetail() {

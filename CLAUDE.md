@@ -106,7 +106,8 @@ python3 deploy-tool/deploy.py deploy --target D1 --dry-run
   - `routers/resource.py` — 资源管控中心**原生页面**（`/resource` 重定向到 `/resource/clusters`，另有 cluster/host 详情页与 `/resource/iframe`）
   - `routers/shells.py` — **4 个** iframe 壳：`/network`、`/task`、`/telemetry`、`/compute`（`/resource` 已不在此列）
   - `routers/api.py` — **10 个** JSON 端点（prefix `/api/metrics`）：`overview`、`bandwidth`、`map`、`links`、**`qos`**、`events`、以及资源管控用的 `clusters`、`clusters/{cluster_id}`、`hosts/{instance:path}/timeseries`、`hosts/{instance:path}`
-- `GET /api/metrics/qos` 返回**网络 QoS 六维评分**（时延/抖动/丢包/可用性/带宽余量/安全性），每个维度带 `measured` 标志区分实测值与占位值。抖动无对应指标，用链路时延标准差代理；带宽余量以 `Settings.network_rated_mbps` 为基准（控制器只上报占用、不含链路额定速率）
+- `GET /api/metrics/qos` 返回**网络 QoS 六维评分**（时延/抖动/丢包/可用性/带宽余量/抗扰动），每个维度带 `measured` 标志区分实测值与占位值。抖动无对应指标，用链路时延标准差代理；带宽余量以 `Settings.network_rated_mbps` 为基准（控制器只上报占用、不含链路额定速率）
+- **抗扰动维度（`key=robustness`）是「代理指标」**，不是真正的攻击检测：用 collector 上报的 TCP 异常计数器速率算分——`node_snmp_Tcp_AttemptFails`（连接失败）/ `node_snmp_Tcp_{Active,Passive}Opens`（新建连接）得失败率，`node_netstat_TcpExt_ListenDrops`（监听队列溢出=洪泛直证），`node_netstat_IpExt_InNoRoutes`（无路由报文）。三项按 0.6/0.25/0.15 加权，失败率缺失则整个维度不给分。`node_netstat_TcpExt_TCPSynRetrans` 只在 detail 里作旁证、不计分（它是链路丢包表征，已由「丢包率」维度覆盖）。原「安全性」维度无直接指标，已于 2026-10 改名为「抗扰动」以免被误读为安全态势
 - PromQL 集中在 `app/prometheus/queries.py`：Dashboard 卡片常量（`Q_*`）+ 资源管控的模板函数（`q_cluster_*` / `q_node_*`，按 `cluster` 或 `instance` 参数化）+ GPU 段（`DCGM_FI_DEV_*`，含 FLOPs 推算 `q_*_flops_peak`）+ `load_cluster_locations()` 加载 `config/cluster_locations.yaml`
 - `PrometheusClient` (`app/prometheus/client.py`) 异步封装 `/api/v1/{query,query_range,targets,labels}`；**所有异常路径返回安全空值**（让调用端走空状态展示而非抛错）
 - 生命周期：`main.py` 的 `lifespan` 启动时构造 `PrometheusClient` 与 `cluster_meta`，关闭时 `aclose()`

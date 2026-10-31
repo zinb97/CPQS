@@ -153,9 +153,14 @@
     // 同步头部 SLA（在线节点 / 总节点）
     const total = (data.total_nodes || {}).value;
     const online = (data.online_nodes || {}).value;
-    const sla = (total && online != null) ? ((online / total) * 100).toFixed(2) + '%' : '—';
+    // 只算数值，单位由各处模板决定：头部 SLA 没有 <small>，地图「节点健康度」有。
+    // 早先把带 '%' 的字符串同时写进两处，导致地图那个渲染成 "90.00%%"。
+    const slaPct = (total && online != null) ? (online / total) * 100 : null;
+    // 头部 SLA 保留两位小数；地图「节点健康度」是概览指标，取整不带小数。
+    const slaText = slaPct == null ? '—' : slaPct.toFixed(2);
+    const slaIntText = slaPct == null ? '—' : String(Math.round(slaPct));
     const slaEl = $('#dsHeaderSla');
-    if (slaEl) slaEl.textContent = sla;
+    if (slaEl) slaEl.textContent = slaPct == null ? '—' : slaText + '%';
 
     // 地图统计
     const clusterCount = $('#msTotal');
@@ -165,7 +170,7 @@
     const taskCount = $('#msTask');
     if (taskCount) taskCount.textContent = fmt((data.packet_in || {}).value);
     const healthEl = $('#msHealth');
-    if (healthEl) healthEl.textContent = sla;
+    if (healthEl) healthEl.textContent = slaIntText;
   }
 
   async function refreshKpi() {

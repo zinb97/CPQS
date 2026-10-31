@@ -29,6 +29,11 @@ from app.prometheus.queries import (
     Q_MEMORY_TOTAL,
     Q_PACKET_IN,
     Q_RULES_ACTIVE,
+    Q_SEC_CONN_FAILS,
+    Q_SEC_CONN_OPENS,
+    Q_SEC_LISTEN_DROPS,
+    Q_SEC_NO_ROUTES,
+    Q_SEC_SYN_RETRANS,
     Q_SWITCHES,
     q_cluster_cpu_cores,
     q_cluster_cpu_flops_peak,
@@ -473,21 +478,65 @@ async def links_quality(request: Request) -> JSONResponse:
     )
 
 
+def _robustness_detail(
+    fail_ratio: float | None,
+    conn_fails: float | None,
+    conn_opens: float | None,
+    listen_drops: float | None,
+    no_routes: float | None,
+    syn_retrans: float | None,
+    rules_active: float | None,
+) -> str:
+    """「抗扰动」维度的说明文案。
+
+    这是代理指标（主机侧 TCP 异常事件），不是真正的攻击检测结果，
+    文案里明说口径，避免被当成安全态势读。
+    """
+    parts: list[str] = []
+    if fail_ratio is not None and conn_fails is not None and conn_opens is not None:
+        parts.append(
+            f"TCP 连接失败率 {fail_ratio * 100:.1f}%"
+            f"（{conn_fails:.2f}/{conn_opens:.2f} 次每秒）"
+        )
+    if listen_drops is not None:
+        parts.append(f"监听队列丢弃 {listen_drops:.2f}/秒")
+    if no_routes is not None:
+        parts.append(f"无路由报文 {no_routes:.2f}/秒")
+    if syn_retrans is not None:
+        parts.append(f"SYN 重传 {syn_retrans:.2f}/秒（旁证，不计分）")
+    if rules_active is not None:
+        parts.append(f"已下发 QoS 规则 {int(rules_active)} 条")
+    if not parts:
+        return "暂无指标采集"
+    return "代理指标：" + "，".join(parts)
+
+
 @router.get("/qos")
 async def qos_score(request: Request) -> JSONResponse:
-    """网络 QoS 六维评分：全部由 QoSController 的真实指标推导。
+    """网络 QoS 六维评分：全部由真实指标推导。
 
     评分口径统一为「0~100，越高越好」，阈值来自经验值而非标准，注释里写明依据。
 
     每个维度带 `measured` 标志：True 表示有真实指标支撑，False 表示该指标
     目前不存在、值是占位。前端据此在图例上标注，避免占位分被当成实测结果。
+
+    「抗扰动」维度没有直接对应的攻击检测指标，用主机侧 TCP 异常计数器作代理
+    ——指标真实存在且持续上报，口径写在 detail 里交代清楚。
     """
-    delay_rows, loss_rows, bw_rows, sw_rows, rule_rows = await asyncio.gather(
+    (
+        delay_rows, loss_rows, bw_rows, sw_rows, rule_rows,
+        fail_rows, open_rows, listen_rows, route_rows, syn_rows,
+    ) = await asyncio.gather(
         _safe_query(request, Q_LINKS_QUALITY),
         _safe_query(request, Q_LINKS_LOSS),
         _safe_query(request, Q_LINKS_BANDWIDTH),
         _safe_query(request, Q_SWITCHES),
         _safe_query(request, Q_RULES_ACTIVE),
+        _safe_query(request, Q_SEC_CONN_FAILS),
+        _safe_query(request, Q_SEC_CONN_OPENS),
+        _safe_query(request, Q_SEC_LISTEN_DROPS),
+        _safe_query(request, Q_SEC_NO_ROUTES),
+        _safe_query(request, Q_SEC_SYN_RETRANS),
     )
 
     delays = [v for v in (_scalar([r]) for r in delay_rows) if v is not None]
@@ -509,9 +558,36 @@ async def qos_score(request: Request) -> JSONResponse:
     rules_active = _scalar(rule_rows)
     rated_mbps = request.app.state.settings.network_rated_mbps
 
+    # 抗扰动信号（每秒发生率，跨全部采集节点求和）
+    conn_fails = _scalar(fail_rows)
+    conn_opens = _scalar(open_rows)
+    listen_drops = _scalar(listen_rows)
+    no_routes = _scalar(route_rows)
+    syn_retrans = _scalar(syn_rows)
+    # 连接失败率 = 失败 / 新建连接，与业务流量规模无关，可跨时段比较
+    fail_ratio = (
+        conn_fails / conn_opens
+        if conn_fails is not None and conn_opens and conn_opens > 0
+        else None
+    )
+
     def _lin(v: float | None, zero_at: float) -> float | None:
         """越高越好：v=0 满分，v≥zero_at 归零。"""
         return None if v is None else round(max(0.0, min(100.0, 100.0 * (1 - v / zero_at))), 1)
+
+    # 抗扰动子分：连接失败率 20% 归零、监听丢弃 1 次/s 归零、无路由 10 包/s 归零。
+    # 三项按 0.6/0.25/0.15 加权——失败率是主信号，监听丢弃是最硬的洪泛证据。
+    sub_fail = _lin(fail_ratio, 0.20)
+    sub_listen = _lin(listen_drops, 1.0)
+    sub_route = _lin(no_routes, 10.0)
+    robustness_parts = [(sub_fail, 0.6), (sub_listen, 0.25), (sub_route, 0.15)]
+    # 失败率缺失说明核心信号不可得，此时不算分（避免用旁证拼出假分数）
+    robustness = None
+    if sub_fail is not None:
+        present = [(s, w) for s, w in robustness_parts if s is not None]
+        robustness = round(
+            sum(s * w for s, w in present) / sum(w for _, w in present), 1
+        )
 
     dims = [
         {"key": "latency", "label": "时延",
@@ -538,12 +614,14 @@ async def qos_score(request: Request) -> JSONResponse:
          "measured": bandwidth_mbps is not None,
          "detail": f"占用 {bandwidth_mbps:.2f} / 额定 {rated_mbps:.0f} Mbps"
                    if bandwidth_mbps is not None else "无数据"},
-        # 安全性没有对应指标（DSCP 策略数 qos_rules_active 可作侧面佐证），
-        # 这里明确标为未采集，不给编造分。
-        {"key": "security", "label": "安全性",
-         "score": None, "measured": False,
-         "detail": f"暂无指标采集（已下发 QoS 规则 {int(rules_active)} 条）"
-                   if rules_active is not None else "暂无指标采集"},
+        # 抗扰动：用主机侧 TCP 异常事件代理，没有真正的攻击检测指标。
+        # 旁证信号缺失时按剩余权重归一；核心信号（失败率）缺失则整个维度不给分。
+        {"key": "robustness", "label": "抗扰动",
+         "score": robustness, "measured": robustness is not None,
+         "detail": _robustness_detail(
+             fail_ratio, conn_fails, conn_opens,
+             listen_drops, no_routes, syn_retrans, rules_active,
+         )},
     ]
 
     return cache_response({"dimensions": dims}, max_age=request.app.state.settings.cards_cache_s)

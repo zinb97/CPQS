@@ -45,8 +45,29 @@ Q_EVENTS = "ALERTS"
 
 # ===== QoS 评分雷达 =====
 # qos_rules_active：控制器当前生效的 QoS/DSCP 策略条数。目前恒为 0
-# （策略尚未下发），只作「安全性」维度的旁证，不参与计分。
+# （策略尚未下发），只作「抗扰动」维度的旁证，不参与计分。
 Q_RULES_ACTIVE = "qos_rules_active"
+
+# 「抗扰动」维度用主机侧 TCP 异常计数器作代理（无真正的攻击检测指标）。
+# 来源：collector 从 /proc/net/snmp 与 /proc/net/netstat 读取，平铺成
+# node_snmp_<Proto>_<Field> / node_netstat_<Proto>_<Field> 上报，均为累计值，
+# 取 rate() 得每秒发生率。9 个节点 target 全部覆盖。
+#
+# 口径：
+# - 连接失败   AttemptFails：TCP 连接尝试被拒（端口不可达、探测/扫描）
+# - 新建连接   ActiveOpens（客户端主动）+ PassiveOpens（服务端被动）
+# - 监听丢弃   TcpExt.ListenDrops：内核 accept 队列溢出丢连接，连接洪泛直证
+# - 无路由报文 IpExt.InNoRoutes：无可用路由的报文，扫描/路由误配迹象
+Q_SEC_CONN_FAILS = "sum(rate(node_snmp_Tcp_AttemptFails[5m]))"
+Q_SEC_CONN_OPENS = (
+    "sum(rate(node_snmp_Tcp_ActiveOpens[5m]))"
+    " + sum(rate(node_snmp_Tcp_PassiveOpens[5m]))"
+)
+Q_SEC_LISTEN_DROPS = "sum(rate(node_netstat_TcpExt_ListenDrops[5m]))"
+Q_SEC_NO_ROUTES = "sum(rate(node_netstat_IpExt_InNoRoutes[5m]))"
+# SYN 重传不参与计分（它是链路丢包的表征，已由「丢包率」维度覆盖），
+# 只在维度说明里作旁证展示。
+Q_SEC_SYN_RETRANS = "sum(rate(node_netstat_TcpExt_TCPSynRetrans[5m]))"
 
 
 # ===== 资源管控中心页面 PromQL 模板 =====
