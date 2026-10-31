@@ -3,3 +3,5 @@
 /.claude/
 __pycache__/
 /backen/nohup.out
+/nohup.out
+/collector/nohup.out

@@ -667,17 +667,9 @@
         const data = await r.json();
         const dims = data.dimensions || [];
         render(dims);
-        // 角标如实反映有几个维度是真有指标的，别再挂一个写死的 "A+"
-        const measured = dims.filter((d) => d.measured && d.score != null).length;
-        const tag = $('#qosTag');
-        if (tag) {
-          tag.textContent = measured
-            ? `${measured}/${dims.length} 项实测`
-            : '暂无指标';
-          tag.title = dims
-            .map((d) => `${d.measured ? '●' : '○'} ${d.label}：${d.detail || ''}`)
-            .join('\n');
-        }
+        // 原先这里还有个「N/N 项实测」角标，已按要求移除：
+        // 各维度的实测状态与得分在雷达图的 tooltip 里都有（render 的 formatter），
+        // 角标是重复信息。面板标题右侧现在什么都不显示。
       } catch (e) {
         // 保留上次
       }
