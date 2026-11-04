@@ -126,9 +126,10 @@ python3 deploy-tool/deploy.py deploy --target D1 --dry-run
 
 ## deploy-tool/ 架构要点
 
-- `deploy.py`（约 1500 行）**只依赖 Python 标准库 + 系统 `ssh` 客户端**，不用 `rsync`/`scp`/pip 包
-- 三个子命令：`list`（看服务器）、`check`（只读预检：SSH 登录、目标目录可写、远端 `tar`）、`deploy`（打包并上传）。服务器清单与全局默认在 `servers.json`
-- **`--target` 填的是 `servers.json` 里的 `name`**，当前为 `X1`–`X7`（xfusion 组）、`L1`–`L4`（hello 组）、`D1`（lab 组 `192.168.10.31`）。`deploy-tool/README.md` 里的 `xfusion-1011` / `u-192-168-10-31` 等名字是**旧版文档、已与配置不符**，以 `deploy.py list` 的输出为准
+- `deploy.py`（约 1900 行）**只依赖 Python 标准库 + 系统 `ssh` 客户端**，不用 `rsync`/`scp`/pip 包
+- 七个子命令：`list`（看服务器）、`check`（只读预检：SSH 登录、目标目录可写、远端 `tar`）、`deploy`（打包并上传）、`start`/`stop`/`restart`/`status`（远端后台任务管理）。服务器清单、任务定义与全局默认在 `servers.json`
+- **远端后台任务**：`start` 用 `nohup setsid` 在远端拉起常驻进程（如 `collector/metrics_exporter.py`），PID 写 `/opt/CPQS/.run/<任务>.pid`，日志写 `/opt/CPQS/logs/<任务>.log`（两个目录已在 `.deployignore` 里排除，不会外发）。`stop` 停止前比对 `/proc/<pid>/cmdline` 防 PID 复用误杀；进程秒退会被检出并回报日志尾部。任务定义在 `servers.json` 的 `tasks` 段（内置默认 `collector`），支持每台服务器私有化覆盖（`enabled:false` 可关停）。`deploy --restart-tasks` 可在部署后自动重启任务
+- **`--target` 填的是 `servers.json` 里的 `name`**，当前为 `X1`–`X7`（xfusion 组）、`L1`–`L4`（hello 组）、`D1`（lab 组 `192.168.10.31`）。以 `deploy.py list` 的输出为准
 - 流水线：本地遍历源目录（应用排除规则）→ 生成 `tar.gz`（文件权限优先从 git 索引读取）→ 经 `ssh` 把归档从 stdin 传给远端 → 远端 `tar -xzf - -C /opt/CPQS` → 以 stdout 中的 `CPQS_DEPLOY_OK` 标记判定成功
 - **默认覆盖式部署**：同名文件被替换，但远端已有、本次归档中没有的文件**不会删除**（保护日志、`.env`、虚拟环境）。需要完全一致时由人工备份后清理
 - 排除规则来源顺序：内置（`.git`/`.svn`/`.hg` + 部署工具自身）→ `deploy-tool/.deployignore` → 根目录 `.deployignore` → `--exclude` → `servers.json` 的 `exclude`。语法不支持 `!` 取反（遇到直接报错而非静默失效）
@@ -159,6 +160,7 @@ print('sw=', len(t.switches()), 'ln=', len(t.links()), 'ho=', len(t.hosts()))
 # deploy-tool（语法检查 + 只读预检，不写远端）
 python3 -m py_compile deploy-tool/deploy.py
 python3 deploy-tool/deploy.py list
+python3 deploy-tool/deploy.py status --all   # 只读：查远端后台任务状态
 ```
 
 端到端验证只能靠实际起服务：起 collector → Prometheus 里查 `up` → 起 backen 看 `/api/metrics/overview` 是否非空。

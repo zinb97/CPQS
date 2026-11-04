@@ -39,5 +39,9 @@ Thumbs.db
 *.swp
 *~
 
+# 远端运行时状态（deploy-tool start 生成：PID 文件与任务日志）
+.run/
+logs/*
+
 # 部署工具自身
 deploy-tool/

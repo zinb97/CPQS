@@ -1,19 +1,20 @@
 # CPQS 代码部署工具
 
-把本地 `D:\Project\CPQS` 项目代码通过 SSH 部署到多台服务器的 `/opt/CPQS`。
+把本地项目代码通过 SSH 部署到多台服务器的 `/opt/CPQS`。
 
 工具只依赖 **Python 标准库 + 系统 OpenSSH 客户端**，不需要 `rsync`、`scp` 或任何 pip 包。
 
 ## 特性
 
 - 使用 `~/.ssh/id_rsa` 密钥登录，不保存密码；
-- 支持 10 台服务器（可按名称、分组或全部选择）；
+- 支持多台服务器（可按名称、分组或全部选择）；
 - 多台并发部署，默认 4 并发；
 - 部署前自动检查 SSH、目标目录权限、远端 `tar`；
 - `--dry-run` 只打包和预检，不写远端；
 - 通过 `tar.gz` 流式传输，适合 Windows 本地环境；
 - 默认不删除远端已有文件，避免误删日志、配置或虚拟环境；
-- 从 git 索引读取文件权限，Windows 上也能保留脚本的可执行位。
+- 从 git 索引读取文件权限，Windows 上也能保留脚本的可执行位；
+- **可在远端后台拉起常驻进程**（如 `metrics_exporter.py`），并随时结束、查看状态。
 
 ## 目录结构
 
@@ -45,20 +46,20 @@ deploy-tool/
 
 ## 快速开始
 
-在项目根目录 `D:\Project\CPQS` 下执行：
+在项目根目录下执行：
 
 ```powershell
 # 1. 查看服务器列表
 py deploy-tool\deploy.py list
 
-# 2. 检查全部 10 台服务器（只读，不部署）
+# 2. 检查全部服务器（只读，不部署）
 py deploy-tool\deploy.py check --all
 
 # 3. 单台预演：打包、检查，但不上传
-py deploy-tool\deploy.py deploy --target xfusion-1011 --dry-run
+py deploy-tool\deploy.py deploy --target X1 --dry-run
 
 # 4. 部署到单台
-py deploy-tool\deploy.py deploy --target xfusion-1011
+py deploy-tool\deploy.py deploy --target X1
 
 # 5. 按用户分组部署
 py deploy-tool\deploy.py deploy --group xfusion
@@ -66,6 +67,13 @@ py deploy-tool\deploy.py deploy --group hello
 
 # 6. 部署到全部服务器
 py deploy-tool\deploy.py deploy --all
+
+# 7. 在远端后台拉起 collector（metrics_exporter.py），脱离 SSH 会话常驻
+py deploy-tool\deploy.py start --all
+
+# 8. 查看/结束远端后台任务
+py deploy-tool\deploy.py status --target D1
+py deploy-tool\deploy.py stop --all
 ```
 
 也可以使用 PowerShell 启动器：
@@ -73,7 +81,7 @@ py deploy-tool\deploy.py deploy --all
 ```powershell
 .\deploy-tool\deploy.ps1 list
 .\deploy-tool\deploy.ps1 check --all
-.\deploy-tool\deploy.ps1 deploy --target xfusion-1011
+.\deploy-tool\deploy.ps1 deploy --target X1
 ```
 
 > 部署到多台服务器时会要求输入 `yes` 确认；非交互环境（CI）请加 `--yes`。
@@ -100,18 +108,22 @@ py deploy-tool\deploy.py deploy --all
 
 配置在 [`servers.json`](servers.json)，当前包含：
 
-| 名称 | 分组 | 主机 | 端口 | 用户 | 部署路径 |
-|------|------|------|------|------|----------|
-| `xfusion-1011` | xfusion | S501.site | 1011 | xfusion | `/opt/CPQS` |
-| `xfusion-1012` | xfusion | S501.site | 1012 | xfusion | `/opt/CPQS` |
-| `xfusion-1013` | xfusion | S501.site | 1013 | xfusion | `/opt/CPQS` |
-| `xfusion-1014` | xfusion | S501.site | 1014 | xfusion | `/opt/CPQS` |
-| `xfusion-1015` | xfusion | S501.site | 1015 | xfusion | `/opt/CPQS` |
-| `hello-1021` | hello | S501.site | 1021 | hello | `/opt/CPQS` |
-| `hello-1022` | hello | S501.site | 1022 | hello | `/opt/CPQS` |
-| `hello-1023` | hello | S501.site | 1023 | hello | `/opt/CPQS` |
-| `hello-1024` | hello | S501.site | 1024 | hello | `/opt/CPQS` |
-| `u-192-168-10-31` | lab | 192.168.10.31 | 22 | u | `/opt/CPQS` |
+| 名称 | 分组 | 主机 | 端口 | 用户 | 部署路径 | 后台任务 |
+|------|------|------|------|------|----------|----------|
+| `X1` | xfusion | S501.site | 1011 | xfusion | `/opt/CPQS` | collector |
+| `X2` | xfusion | S501.site | 1012 | xfusion | `/opt/CPQS` | collector |
+| `X3` | xfusion | S501.site | 1013 | xfusion | `/opt/CPQS` | collector |
+| `X4` | xfusion | S501.site | 1014 | xfusion | `/opt/CPQS` | collector |
+| `X5` | xfusion | S501.site | 1015 | xfusion | `/opt/CPQS` | collector |
+| `X6` | xfusion | S501.site | 1016 | xfusion | `/opt/CPQS` | collector |
+| `X7` | xfusion | S501.site | 1016 | xfusion | `/opt/CPQS` | collector |
+| `L1` | hello | S501.site | 1021 | hello | `/opt/CPQS` | collector |
+| `L2` | hello | S501.site | 1022 | hello | `/opt/CPQS` | collector |
+| `L3` | hello | S501.site | 1023 | hello | `/opt/CPQS` | collector |
+| `L4` | hello | S501.site | 1024 | hello | `/opt/CPQS` | collector |
+| `D1` | lab | 192.168.10.31 | 22 | u | `/opt/CPQS` | collector |
+
+> 表内容以 `deploy.py list` 的实时输出为准；`--target` 填的是这里的**名称**。
 
 ## 配置说明
 
@@ -127,6 +139,7 @@ py deploy-tool\deploy.py deploy --all
 | `timeout` | 否 | `900` | 单台部署超时秒数，10–86400 |
 | `strict_host_key_checking` | 否 | `accept-new` | `yes` / `no` / `ask` / `accept-new` |
 | `exclude` | 否 | `[]` | 额外排除规则数组，与 `.deployignore` 叠加 |
+| `tasks` | 否 | 内置 `collector` | 后台任务定义，见「后台任务」一节 |
 | `servers` | 是 | — | 服务器数组，不能为空 |
 
 每个服务器对象：
@@ -140,6 +153,7 @@ py deploy-tool\deploy.py deploy --all
 | `group` | 否 | 分组名，供 `--group` 使用 |
 | `deploy_path` | 否 | 覆盖全局部署路径 |
 | `key_path` | 否 | 覆盖全局私钥路径 |
+| `tasks` | 否 | 该服务器私有的任务定义，字段级覆盖全局 `tasks` |
 
 新增服务器示例：
 
@@ -207,6 +221,82 @@ find /opt/CPQS -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 ```
 
 > 本工具不会自动执行上述删除操作。
+
+## 后台任务：让远端常驻运行 `metrics_exporter.py`
+
+除了把代码传过去，工具还可以在远端**后台拉起常驻进程**（脱离 SSH 会话，SSH 断开后继续运行），并结束、查看它们。
+
+```bash
+py deploy-tool\deploy.py start   --all                        # 启动所有已启用任务
+py deploy-tool\deploy.py start   --target D1 --task collector # 只启动指定任务
+py deploy-tool\deploy.py status  --all                        # 查看状态
+py deploy-tool\deploy.py restart --target D1                  # 先停后起
+py deploy-tool\deploy.py stop    --all                        # 结束任务
+```
+
+对多台服务器执行 `start` / `stop` / `restart` 时需要输入 `yes` 确认，非交互环境加 `--yes`。
+
+### 任务定义
+
+任务写在 [`servers.json`](servers.json) 的 `tasks` 段；不写则使用内置默认任务 `collector`：
+
+| 字段 | 必填 | 默认 | 说明 |
+|------|------|------|------|
+| `command` | 是 | — | 启动命令，按空白切分成 `argv` 执行，**不支持管道/重定向等 shell 语法**（需要时写成 `sh -c "..."`） |
+| `cwd` | 否 | 部署目录 | 工作目录；相对路径按该服务器的部署目录展开（`collector` → `/opt/CPQS/collector`） |
+| `env` | 否 | `{}` | 启动前 `export` 的环境变量 |
+| `setup` | 否 | 空 | 启动前执行一次的准备命令（完整 shell 语法），例如装依赖；失败则不启动 |
+| `stop_timeout` | 否 | `10` | 停止时等待进程优雅退出的秒数，超时后 `SIGKILL` |
+| `enabled` | 否 | `true` | 置 `false` 可停用该任务 |
+
+当前默认任务：
+
+```json
+"tasks": {
+  "collector": {
+    "command": "python3 metrics_exporter.py --port 9100",
+    "cwd": "collector",
+    "env": { "PYTHONUNBUFFERED": "1" },
+    "stop_timeout": 10
+  }
+}
+```
+
+某个服务器可以私有化任务定义（在 `servers[]` 对象里写 `tasks`），字段级覆盖全局配置；写 `"enabled": false` 即可在该服务器上关掉某个任务：
+
+```json
+{
+  "name": "D1",
+  "host": "192.168.10.31",
+  "user": "u",
+  "tasks": { "collector": { "enabled": false } }
+}
+```
+
+### 远端运行时文件
+
+| 路径 | 内容 |
+|------|------|
+| `/opt/CPQS/.run/<任务名>.pid` | PID 文件 |
+| `/opt/CPQS/logs/<任务名>.log` | 进程 stdout/stderr（追加写） |
+
+这两个目录已写进 `.deployignore`，不会被打包发到其他服务器。
+
+### 实现要点
+
+- 启动用 `nohup setsid` 拉起，进程自成会话、脱离 SSH；远端没有 `setsid` 时退回 `nohup`；
+- PID 由内层 shell 先写入再 `exec` 成目标进程，因此 PID 文件里就是真实进程 PID；
+- 停止前会比对 `/proc/<pid>/cmdline`，避免 PID 被系统回收后误杀无关进程；
+- 启动后等待 2 秒再探活，进程秒退会报「进程启动后立即退出」并附上日志尾部；
+- `stop` 对没在运行的任务是幂等的，不会报错。
+
+### 部署后重启
+
+```bash
+py deploy-tool\deploy.py deploy --all --restart-tasks
+```
+
+部署成功后自动在该服务器上重启全部已启用任务，让新代码立即生效。
 
 ## 安全与注意事项
 
@@ -293,7 +383,7 @@ py deploy-tool\deploy.py deploy --all --yes
 ### 想保留本次归档排错
 
 ```powershell
-py deploy-tool\deploy.py deploy --target xfusion-1011 --dry-run --keep-archive .\deploy-tool\last.tar.gz
+py deploy-tool\deploy.py deploy --target X1 --dry-run --keep-archive .\deploy-tool\last.tar.gz
 ```
 
 ## 验证

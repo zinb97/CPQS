@@ -14,8 +14,10 @@
 常用命令：
     py deploy.py list
     py deploy.py check --all
-    py deploy.py deploy --target xfusion-1011 --dry-run
+    py deploy.py deploy --target X1 --dry-run
     py deploy.py deploy --all
+    py deploy.py start --all            # 远端后台启动 metrics_exporter.py
+    py deploy.py stop --all             # 结束远端后台任务
 """
 
 from __future__ import annotations
@@ -61,6 +63,10 @@ ERROR_HINTS = {
     "mkdir_failed": "无法创建目标目录",
     "target_not_writable": "目标目录不可写",
     "extract_failed": "远端解包失败（可能是磁盘空间不足、权限不足或 tar 不支持该归档）",
+    "workdir_missing": "远端工作目录不存在（该服务器可能还没部署过代码）",
+    "setup_failed": "远端准备命令执行失败",
+    "start_failed": "进程启动后立即退出，请查看日志",
+    "pid_mismatch": "PID 文件与实际进程不匹配（可能进程已重启导致 PID 复用），已清理 PID 文件",
 }
 
 
@@ -171,6 +177,7 @@ class Server:
     deploy_path: str
     key_path: Path
     group: str = ""
+    task_layers: Tuple[Tuple[str, Dict[str, object]], ...] = ()
 
     @property
     def target(self) -> str:
@@ -196,6 +203,206 @@ class Config:
     strict_host_key_checking: str
     exclude: Tuple[str, ...]
     servers: Tuple[Server, ...]
+    task_layers: Tuple[Tuple[str, Dict[str, object]], ...] = ()
+
+
+# ---------------------------------------------------------------------------
+# 后台任务定义
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Task:
+    """需要在远端后台常驻的一个进程（例如 collector 的 metrics_exporter.py）。"""
+
+    name: str
+    command: str
+    cwd: str = ""
+    env: Tuple[Tuple[str, str], ...] = ()
+    setup: str = ""
+    stop_timeout: int = 10
+    enabled: bool = True
+
+
+# 内置默认任务。servers.json 中定义了同名任务时，以配置为准（字段级覆盖）。
+DEFAULT_TASKS: Dict[str, Dict[str, object]] = {
+    "collector": {
+        "command": "python3 metrics_exporter.py --port 9100",
+        "cwd": "collector",
+        "env": {"PYTHONUNBUFFERED": "1"},
+        "stop_timeout": 10,
+    },
+}
+
+TASK_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+
+
+
+def _parse_task_layers(
+    raw: object, where: str
+) -> Tuple[Tuple[str, Dict[str, object]], ...]:
+    """解析 servers.json 里的 tasks 段落，返回 (任务名, 原始字段) 列表。"""
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict):
+        raise DeployError(f"{where} 必须是 JSON 对象")
+
+    layers: List[Tuple[str, Dict[str, object]]] = []
+    for name, value in raw.items():
+        if not isinstance(name, str) or not name.strip():
+            raise DeployError(f"{where} 的任务名必须是非空字符串")
+        task_name = name.strip()
+        if not TASK_NAME_PATTERN.fullmatch(task_name):
+            raise DeployError(
+                f"{where} 任务名非法: {task_name!r}（只允许字母、数字、下划线、点和短横线）"
+            )
+        if isinstance(value, str):
+            entry: Dict[str, object] = {"command": value}
+        elif isinstance(value, dict):
+            entry = dict(value)
+        else:
+            raise DeployError(f"{where}.{task_name} 必须是字符串或 JSON 对象")
+        layers.append((task_name, entry))
+    return tuple(layers)
+
+
+def _build_task(
+    name: str, layers: Sequence[Dict[str, object]], where: str
+) -> Task:
+    """把默认任务、全局配置、服务器配置三层字段合并成一个任务定义。"""
+    merged: Dict[str, object] = dict(DEFAULT_TASKS.get(name, {}))
+    for layer in layers:
+        merged.update(layer)
+
+    command = merged.get("command", "")
+    if not isinstance(command, str) or not command.strip():
+        raise DeployError(f"{where}.{name} 缺少 command（或 command 为空）")
+
+    cwd = merged.get("cwd", "")
+    if cwd is None:
+        cwd = ""
+    if not isinstance(cwd, str):
+        raise DeployError(f"{where}.{name}.cwd 必须是字符串")
+
+    env_raw = merged.get("env", {})
+    if env_raw is None:
+        env_raw = {}
+    if not isinstance(env_raw, dict):
+        raise DeployError(f"{where}.{name}.env 必须是 JSON 对象")
+    env: List[Tuple[str, str]] = []
+    for key, value in env_raw.items():
+        if not isinstance(key, str) or not key.strip():
+            raise DeployError(f"{where}.{name}.env 的变量名必须是非空字符串")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            raise DeployError(f"{where}.{name}.env 变量名非法: {key!r}")
+        env.append((key, "" if value is None else str(value)))
+
+    setup = merged.get("setup", "")
+    if setup is None:
+        setup = ""
+    if not isinstance(setup, str):
+        raise DeployError(f"{where}.{name}.setup 必须是字符串")
+
+    stop_timeout = merged.get("stop_timeout", 10)
+    if isinstance(stop_timeout, bool) or not isinstance(stop_timeout, int):
+        raise DeployError(f"{where}.{name}.stop_timeout 必须是整数")
+    if not (1 <= stop_timeout <= 600):
+        raise DeployError(f"{where}.{name}.stop_timeout 必须在 1..600 之间")
+
+    enabled = merged.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise DeployError(f"{where}.{name}.enabled 必须是 true/false")
+
+    return Task(
+        name=name,
+        command=command.strip(),
+        cwd=cwd.strip(),
+        env=tuple(env),
+        setup=setup.strip(),
+        stop_timeout=stop_timeout,
+        enabled=enabled,
+    )
+
+
+def resolve_tasks(config: Config, server: Server) -> List[Task]:
+    """合并全局与该服务器私有的任务定义，返回该服务器要运行的任务。"""
+    names: List[str] = []
+    seen: set[str] = set()
+    for layer in (config.task_layers, server.task_layers):
+        for name, _ in layer:
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
+    for name in DEFAULT_TASKS:
+        if name not in seen:
+            seen.add(name)
+            names.append(name)
+
+    tasks: List[Task] = []
+    for name in names:
+        layers = [entry for layer_name, entry in config.task_layers if layer_name == name]
+        layers += [
+            entry for layer_name, entry in server.task_layers if layer_name == name
+        ]
+        task = _build_task(name, layers, "tasks")
+        if task.enabled:
+            tasks.append(task)
+    return tasks
+
+
+def select_tasks(
+    config: Config, server: Server, names: Sequence[str]
+) -> List[Task]:
+    """挑出用户点名的任务；不点名时返回该服务器的全部启用任务。"""
+    available = resolve_tasks(config, server)
+    wanted = [item.strip() for item in names if item.strip()]
+    if not wanted:
+        return available
+
+    by_name = {task.name: task for task in available}
+    unknown = [item for item in wanted if item not in by_name]
+    if unknown:
+        known = ", ".join(sorted(by_name)) or "（无）"
+        raise DeployError(
+            f"服务器 {server.name} 没有任务 {', '.join(unknown)}；可用任务: {known}"
+        )
+    return [by_name[item] for item in wanted]
+
+
+def task_workdir(server: Server, task: Task) -> str:
+    """任务的远端工作目录（相对路径按该服务器的部署目录展开）。"""
+    if not task.cwd:
+        return server.deploy_path
+    if task.cwd.startswith("/"):
+        return posixpath.normpath(task.cwd)
+    return posixpath.normpath(posixpath.join(server.deploy_path, task.cwd))
+
+
+def task_pidfile(server: Server, task: Task) -> str:
+    return posixpath.join(server.deploy_path, ".run", f"{task.name}.pid")
+
+
+def task_logfile(server: Server, task: Task) -> str:
+    return posixpath.join(server.deploy_path, "logs", f"{task.name}.log")
+
+
+def task_marker(command: str) -> str:
+    """从命令里挑一个特征串，用于停止前确认 PID 没有被系统回收后复用。"""
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    if not tokens:
+        return ""
+    for token in tokens:
+        if token.startswith("-"):
+            continue
+        if "." in token and not token.startswith("/"):
+            return token
+    for token in tokens:
+        if not token.startswith("-"):
+            return token
+    return tokens[0]
 
 
 def load_config(path: Path) -> Config:
@@ -252,6 +459,8 @@ def load_config(path: Path) -> Config:
     ):
         raise DeployError("exclude 必须是字符串数组")
 
+    task_layers = _parse_task_layers(raw.get("tasks"), "tasks")
+
     raw_servers = raw.get("servers")
     if not isinstance(raw_servers, list) or not raw_servers:
         raise DeployError("servers 必须是非空数组")
@@ -289,6 +498,9 @@ def load_config(path: Path) -> Config:
             else key_path
         )
         group = str(item.get("group", "")).strip()
+        server_task_layers = _parse_task_layers(
+            item.get("tasks"), f"servers[{index}].tasks"
+        )
 
         servers.append(
             Server(
@@ -299,6 +511,7 @@ def load_config(path: Path) -> Config:
                 deploy_path=server_deploy_path,
                 key_path=server_key,
                 group=group,
+                task_layers=server_task_layers,
             )
         )
 
@@ -313,6 +526,7 @@ def load_config(path: Path) -> Config:
         strict_host_key_checking=strict,
         exclude=tuple(item.strip() for item in raw_exclude if item.strip()),
         servers=tuple(servers),
+        task_layers=task_layers,
     )
 
 
@@ -733,6 +947,165 @@ printf 'CPQS_DEPLOY_OK\\n'
 """
 
 
+def build_start_script(server: Server, task: Task) -> str:
+    """生成远端启动脚本：脱离 SSH 会话在后台常驻，并把 PID 写入 .run/ 目录。"""
+    q = shlex.quote
+    workdir = task_workdir(server, task)
+    pidfile = task_pidfile(server, task)
+    logfile = task_logfile(server, task)
+    # 内层脚本由后台 shell 执行：先把自身 PID 写进 pidfile，再 exec 成真正的进程，
+    # 这样 PID 文件里记录的就是最终进程（例如 python3）的 PID。
+    inner = "set -f; echo $$ > \"$CPQS_PIDFILE\"; exec $CPQS_TASK_CMD"
+
+    lines = [
+        "set -u",
+        "name=" + q(task.name),
+        "command=" + q(task.command),
+        "workdir=" + q(workdir),
+        "pidfile=" + q(pidfile),
+        "logfile=" + q(logfile),
+        "setup_cmd=" + q(task.setup),
+        "rundir=$(dirname \"$pidfile\")",
+        "logdir=$(dirname \"$logfile\")",
+        "printf 'CPQS_TASK_BEGIN\\n'",
+        "printf 'TASK=%s\\n' \"$name\"",
+        "mkdir -p \"$rundir\" \"$logdir\" || { printf 'CPQS_ERROR=mkdir_failed\\n' >&2; exit 5; }",
+        "if [ -f \"$pidfile\" ]; then",
+        "    old_pid=$(cat \"$pidfile\" 2>/dev/null || printf '')",
+        "    if [ -n \"$old_pid\" ] && kill -0 \"$old_pid\" 2>/dev/null; then",
+        "        printf 'CPQS_ALREADY_RUNNING=1\\n'",
+        "        printf 'CPQS_PID=%s\\n' \"$old_pid\"",
+        "        printf 'CPQS_LOG=%s\\n' \"$logfile\"",
+        "        printf 'CPQS_TASK_DONE\\n'",
+        "        exit 0",
+        "    fi",
+        "    rm -f \"$pidfile\"",
+        "fi",
+        "if [ ! -d \"$workdir\" ]; then",
+        "    printf 'CPQS_ERROR=workdir_missing\\n' >&2",
+        "    exit 8",
+        "fi",
+        "cd \"$workdir\" || { printf 'CPQS_ERROR=workdir_missing\\n' >&2; exit 8; }",
+    ]
+    for key, value in task.env:
+        lines.append("export " + key + "=" + q(value))
+    lines += [
+        "if [ -n \"$setup_cmd\" ]; then",
+        "    printf 'CPQS_SETUP_BEGIN\\n'",
+        "    if ! sh -c \"$setup_cmd\"; then",
+        "        printf 'CPQS_ERROR=setup_failed\\n' >&2",
+        "        exit 9",
+        "    fi",
+        "fi",
+        "printf 'CPQS_LAUNCH=1\\n'",
+        "if command -v setsid >/dev/null 2>&1; then",
+        "    CPQS_PIDFILE=\"$pidfile\" CPQS_TASK_CMD=\"$command\" nohup setsid sh -c "
+        + q(inner)
+        + " >>\"$logfile\" 2>&1 </dev/null &",
+        "else",
+        "    CPQS_PIDFILE=\"$pidfile\" CPQS_TASK_CMD=\"$command\" nohup sh -c "
+        + q(inner)
+        + " >>\"$logfile\" 2>&1 </dev/null &",
+        "fi",
+        "sleep 2",
+        "pid=$(cat \"$pidfile\" 2>/dev/null || printf '')",
+        "if [ -z \"$pid\" ] || ! kill -0 \"$pid\" 2>/dev/null; then",
+        "    rm -f \"$pidfile\"",
+        "    printf 'CPQS_ERROR=start_failed\\n' >&2",
+        "    printf 'CPQS_LOG=%s\\n' \"$logfile\"",
+        "    printf 'CPQS_LOG_TAIL_BEGIN\\n'",
+        "    tail -n 20 \"$logfile\" 2>/dev/null || true",
+        "    printf 'CPQS_LOG_TAIL_END\\n'",
+        "    exit 11",
+        "fi",
+        "printf 'CPQS_STARTED=1\\n'",
+        "printf 'CPQS_PID=%s\\n' \"$pid\"",
+        "printf 'CPQS_LOG=%s\\n' \"$logfile\"",
+        "printf 'CPQS_TASK_DONE\\n'",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def build_stop_script(server: Server, task: Task) -> str:
+    """生成远端停止脚本：先 TERM，必要时按进程组收尾，最后清掉 PID 文件。"""
+    q = shlex.quote
+    lines = [
+        "set -u",
+        "name=" + q(task.name),
+        "pidfile=" + q(task_pidfile(server, task)),
+        "marker=" + q(task_marker(task.command)),
+        "stop_timeout=" + str(task.stop_timeout),
+        "printf 'CPQS_TASK_BEGIN\\n'",
+        "printf 'TASK=%s\\n' \"$name\"",
+        "if [ ! -f \"$pidfile\" ]; then",
+        "    printf 'CPQS_NOT_RUNNING=1\\n'",
+        "    printf 'CPQS_TASK_DONE\\n'",
+        "    exit 0",
+        "fi",
+        "pid=$(cat \"$pidfile\" 2>/dev/null || printf '')",
+        "if [ -z \"$pid\" ] || ! kill -0 \"$pid\" 2>/dev/null; then",
+        "    rm -f \"$pidfile\"",
+        "    printf 'CPQS_NOT_RUNNING=1\\n'",
+        "    printf 'CPQS_TASK_DONE\\n'",
+        "    exit 0",
+        "fi",
+        # PID 复用保护：命令行对不上说明这个 PID 已经是别的进程，不能乱杀。
+        "if [ -n \"$marker\" ] && [ -r \"/proc/$pid/cmdline\" ]; then",
+        "    cmdline=$(tr '\\0' ' ' < \"/proc/$pid/cmdline\" 2>/dev/null || printf '')",
+        "    case \"$cmdline\" in",
+        "        *\"$marker\"*) ;;",
+        "        *) rm -f \"$pidfile\"; printf 'CPQS_ERROR=pid_mismatch\\n' >&2; exit 10 ;;",
+        "    esac",
+        "fi",
+        # setsid 起的进程自成进程组，优先整组终止，避免留下孤儿进程。
+        "pgrp=$(sed 's/.*) //' \"/proc/$pid/stat\" 2>/dev/null | awk '{print $3}')",
+        "if [ -n \"$pgrp\" ] && [ \"$pgrp\" = \"$pid\" ]; then",
+        "    kill -TERM \"-$pgrp\" 2>/dev/null || true",
+        "fi",
+        "kill -TERM \"$pid\" 2>/dev/null || true",
+        "i=0",
+        "while [ \"$i\" -lt \"$stop_timeout\" ]; do",
+        "    kill -0 \"$pid\" 2>/dev/null || break",
+        "    sleep 1",
+        "    i=$((i + 1))",
+        "done",
+        "if kill -0 \"$pid\" 2>/dev/null; then",
+        "    kill -KILL \"$pid\" 2>/dev/null || true",
+        "    sleep 1",
+        "    printf 'CPQS_FORCE_KILLED=1\\n'",
+        "fi",
+        "rm -f \"$pidfile\"",
+        "printf 'CPQS_STOPPED=1\\n'",
+        "printf 'CPQS_PID=%s\\n' \"$pid\"",
+        "printf 'CPQS_TASK_DONE\\n'",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def build_status_script(server: Server, tasks: Sequence[Task]) -> str:
+    """生成远端状态脚本：一次性汇报所有任务的 PID 与状态。"""
+    q = shlex.quote
+    lines = ["set -u", "printf 'CPQS_STATUS_BEGIN\\n'"]
+    for task in tasks:
+        lines += [
+            "name=" + q(task.name),
+            "pidfile=" + q(task_pidfile(server, task)),
+            "pid=''",
+            "state='stopped'",
+            "if [ -f \"$pidfile\" ]; then",
+            "    pid=$(cat \"$pidfile\" 2>/dev/null || printf '')",
+            "    if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then state='running'; else state='stale'; fi",
+            "fi",
+            "cmd=''",
+            "if [ \"$state\" = 'running' ] && [ -r \"/proc/$pid/cmdline\" ]; then",
+            "    cmd=$(tr '\\0' ' ' < \"/proc/$pid/cmdline\" 2>/dev/null || printf '')",
+            "fi",
+            "printf 'CPQS_ROW|%s|%s|%s|%s\\n' \"$name\" \"$state\" \"$pid\" \"$cmd\"",
+        ]
+    lines.append("printf 'CPQS_STATUS_DONE\\n'")
+    return "\n".join(lines) + "\n"
+
+
 def explain_ssh_error(
     result: CommandResult,
     server: Optional[Server] = None,
@@ -1060,6 +1433,7 @@ def deploy_one(
     reporter: Reporter,
     dry_run: bool,
     timeout: int,
+    restart_tasks: bool = False,
 ) -> DeployResult:
     start = time.monotonic()
     try:
@@ -1114,10 +1488,15 @@ def deploy_one(
                 elapsed=time.monotonic() - start,
                 size=archive.size,
             )
+
+        message = "部署完成"
+        if restart_tasks:
+            message += "；" + _restart_tasks_on_server(server, config, reporter)
+
         return DeployResult(
             server=server,
             ok=True,
-            message="部署完成",
+            message=message,
             elapsed=time.monotonic() - start,
             size=archive.size,
         )
@@ -1139,6 +1518,433 @@ def deploy_one(
             size=archive.size,
             dry_run=dry_run,
         )
+
+
+@dataclass(frozen=True)
+class TaskOutcome:
+    """一次远端任务操作的结果。"""
+
+    server: Server
+    task: Task
+    ok: bool
+    action: str
+    pid: str
+    message: str
+    elapsed: float
+
+
+def _placeholder_task() -> Task:
+    return Task(name="(未选择)", command="")
+
+
+def _extract_log_tail(stdout: str, limit: int = 5) -> List[str]:
+    """从远端输出里取出日志尾部（启动失败时给用户看现场）。"""
+    lines = stdout.splitlines()
+    try:
+        begin = lines.index("CPQS_LOG_TAIL_BEGIN")
+        end = lines.index("CPQS_LOG_TAIL_END")
+    except ValueError:
+        return []
+    tail = [line for line in lines[begin + 1 : end] if line.strip()]
+    return tail[-limit:]
+
+
+def start_task_on(
+    server: Server,
+    config: Config,
+    task: Task,
+    reporter: Reporter,
+    timeout: int,
+) -> TaskOutcome:
+    """在远端后台启动任务。"""
+    start = time.monotonic()
+    try:
+        runner = SshRunner(server, config, verbose=reporter.verbose)
+        result = runner.run(build_start_script(server, task), timeout=timeout)
+    except DeployError as exc:
+        return TaskOutcome(
+            server, task, False, "error", "", str(exc), time.monotonic() - start
+        )
+    except Exception as exc:  # noqa: BLE001 - 单台失败不应中断其他服务器
+        return TaskOutcome(
+            server,
+            task,
+            False,
+            "error",
+            "",
+            f"未预期错误: {exc}",
+            time.monotonic() - start,
+        )
+
+    elapsed = time.monotonic() - start
+    data = parse_kv_output(result.stdout)
+    pid = data.get("CPQS_PID", "")
+
+    if result.returncode != 0:
+        message = explain_ssh_error(result, server)
+        tail = _extract_log_tail(result.stdout)
+        if tail:
+            message += " | 日志尾部: " + " / ".join(one_line(line, 120) for line in tail)
+        return TaskOutcome(server, task, False, "error", pid, message, elapsed)
+    if "CPQS_ALREADY_RUNNING" in result.stdout:
+        return TaskOutcome(
+            server, task, True, "already_running", pid, "已在运行，未重复启动", elapsed
+        )
+    if "CPQS_STARTED" in result.stdout:
+        message = "已启动"
+        if pid:
+            message += f"（pid={pid}）"
+        logfile = data.get("CPQS_LOG", "")
+        if logfile:
+            message += f"，日志 {logfile}"
+        return TaskOutcome(server, task, True, "started", pid, message, elapsed)
+    return TaskOutcome(
+        server, task, False, "error", pid, "远端未返回启动成功标记", elapsed
+    )
+
+
+def stop_task_on(
+    server: Server,
+    config: Config,
+    task: Task,
+    reporter: Reporter,
+    timeout: int,
+) -> TaskOutcome:
+    """结束远端后台任务。"""
+    start = time.monotonic()
+    try:
+        runner = SshRunner(server, config, verbose=reporter.verbose)
+        result = runner.run(build_stop_script(server, task), timeout=timeout)
+    except DeployError as exc:
+        return TaskOutcome(
+            server, task, False, "error", "", str(exc), time.monotonic() - start
+        )
+    except Exception as exc:  # noqa: BLE001
+        return TaskOutcome(
+            server,
+            task,
+            False,
+            "error",
+            "",
+            f"未预期错误: {exc}",
+            time.monotonic() - start,
+        )
+
+    elapsed = time.monotonic() - start
+    data = parse_kv_output(result.stdout)
+    pid = data.get("CPQS_PID", "")
+
+    if result.returncode != 0:
+        return TaskOutcome(
+            server, task, False, "error", pid, explain_ssh_error(result, server), elapsed
+        )
+    if "CPQS_NOT_RUNNING" in result.stdout:
+        return TaskOutcome(
+            server, task, True, "not_running", "", "本来就没有在运行", elapsed
+        )
+    if "CPQS_STOPPED" in result.stdout:
+        message = "已结束"
+        if pid:
+            message += f"（pid={pid}）"
+        if "CPQS_FORCE_KILLED" in result.stdout:
+            message += "，超时后强制终止"
+        return TaskOutcome(server, task, True, "stopped", pid, message, elapsed)
+    return TaskOutcome(
+        server, task, False, "error", pid, "远端未返回停止成功标记", elapsed
+    )
+
+
+def status_tasks_on(
+    server: Server,
+    config: Config,
+    tasks: Sequence[Task],
+    reporter: Reporter,
+    timeout: int,
+) -> List[TaskOutcome]:
+    """查询远端任务状态。"""
+    start = time.monotonic()
+    by_name = {task.name: task for task in tasks}
+    try:
+        runner = SshRunner(server, config, verbose=reporter.verbose)
+        result = runner.run(build_status_script(server, tasks), timeout=timeout)
+    except DeployError as exc:
+        return [
+            TaskOutcome(server, task, False, "error", "", str(exc), 0.0) for task in tasks
+        ]
+    except Exception as exc:  # noqa: BLE001
+        return [
+            TaskOutcome(
+                server, task, False, "error", "", f"未预期错误: {exc}", 0.0
+            )
+            for task in tasks
+        ]
+
+    elapsed = time.monotonic() - start
+    if result.returncode != 0:
+        message = explain_ssh_error(result, server)
+        return [
+            TaskOutcome(server, task, False, "error", "", message, elapsed)
+            for task in tasks
+        ]
+
+    rows: Dict[str, Tuple[str, str, str]] = {}
+    for line in result.stdout.splitlines():
+        if not line.startswith("CPQS_ROW|"):
+            continue
+        parts = line.split("|", 4)
+        if len(parts) < 4:
+            continue
+        rows[parts[1]] = (parts[2], parts[3], parts[4] if len(parts) > 4 else "")
+
+    outcomes: List[TaskOutcome] = []
+    for task in tasks:
+        state, pid, cmd = rows.get(task.name, ("unknown", "", ""))
+        if state == "running":
+            message = f"运行中（pid={pid}）"
+            if cmd:
+                message += f" {cmd.strip()}"
+            outcomes.append(
+                TaskOutcome(server, task, True, "running", pid, message, elapsed)
+            )
+        elif state == "stale":
+            outcomes.append(
+                TaskOutcome(
+                    server,
+                    task,
+                    True,
+                    "stale",
+                    pid,
+                    "PID 文件残留但进程已不存在（可执行 stop 清理）",
+                    elapsed,
+                )
+            )
+        else:
+            outcomes.append(
+                TaskOutcome(server, task, True, "stopped", "", "未运行", elapsed)
+            )
+    return outcomes
+
+
+def _restart_tasks_on_server(
+    server: Server, config: Config, reporter: Reporter
+) -> str:
+    """重启该服务器上的全部启用任务，返回一句摘要。"""
+    tasks = resolve_tasks(config, server)
+    if not tasks:
+        return "没有启用的后台任务"
+    timeout = config.connect_timeout + 60
+    parts: List[str] = []
+    for task in tasks:
+        stopped = stop_task_on(server, config, task, reporter, timeout)
+        if not stopped.ok:
+            parts.append(f"{task.name} 停止失败({one_line(stopped.message, 60)})")
+            continue
+        started = start_task_on(server, config, task, reporter, timeout)
+        if started.ok:
+            parts.append(f"{task.name} {started.action}")
+        else:
+            parts.append(f"{task.name} 启动失败({one_line(started.message, 60)})")
+    return "后台任务: " + "; ".join(parts)
+
+
+def _format_task_line(result: TaskOutcome) -> str:
+    status = "[OK]  " if result.ok else "[FAIL]"
+    action = result.action or "-"
+    return (
+        f"{status} {result.server.name:<12} {result.task.name:<16} {action:<16} "
+        f"{result.elapsed:>6.1f}s  {one_line(result.message, 160)}"
+    )
+
+
+def _print_task_summary(results: Sequence[TaskOutcome], title: str, reporter: Reporter) -> None:
+    reporter.line("")
+    reporter.line("=" * 92)
+    reporter.line(title)
+    reporter.line("-" * 92)
+    for result in results:
+        reporter.line(_format_task_line(result))
+    reporter.line("-" * 92)
+    passed = sum(1 for result in results if result.ok)
+    reporter.line(f"成功 {passed} / {len(results)}")
+    reporter.line("=" * 92)
+
+
+def _confirm_multi(
+    targets: Sequence[Server], action: str, reporter: Reporter, assume_yes: bool
+) -> None:
+    """多台服务器执行写操作前的确认。"""
+    if assume_yes or len(targets) <= 1:
+        return
+    if not sys.stdin.isatty():
+        raise DeployError(f"多台服务器{action}需要确认；非交互环境请加 --yes")
+    reporter.line(f"即将在以下服务器上{action}：")
+    for server in targets:
+        reporter.line(f"  - {server.name:<22} {server.endpoint:<30} {server.deploy_path}")
+    answer = input("确认请输入 yes: ").strip().lower()
+    if answer not in ("yes", "y"):
+        raise DeployError(f"已取消{action}")
+
+
+def _task_timeout(config: Config, args: argparse.Namespace, extra: int = 30) -> int:
+    timeout = getattr(args, "timeout", None)
+    if timeout is None:
+        timeout = config.connect_timeout + extra
+    if not (10 <= timeout <= 3600):
+        raise DeployError("--timeout 必须在 10..3600 之间")
+    return timeout
+
+
+def _tasks_for_server(
+    server: Server, config: Config, names: Sequence[str]
+) -> List[Task]:
+    return select_tasks(config, server, names)
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    """启动远端后台任务。"""
+    config = _load_config_arg(args)
+    targets = select_servers(config, args.target or [], args.group or [], args.all)
+    jobs = _effective_jobs(args.jobs, config.jobs, len(targets))
+    timeout = _task_timeout(config, args)
+    reporter = Reporter(args.verbose)
+
+    reporter.line(f"CPQS 后台任务启动 v{VERSION}")
+    reporter.line(f"目标数量 : {len(targets)}")
+    reporter.line(f"任务     : {', '.join(args.task) if args.task else '全部已启用任务'}")
+    reporter.line("")
+    _confirm_multi(targets, "启动后台任务", reporter, args.yes)
+
+    def handle(server: Server) -> List[TaskOutcome]:
+        try:
+            tasks = _tasks_for_server(server, config, args.task or [])
+        except DeployError as exc:
+            return [TaskOutcome(server, _placeholder_task(), False, "error", "", str(exc), 0.0)]
+        if not tasks:
+            return [
+                TaskOutcome(
+                    server, _placeholder_task(), True, "skipped", "", "没有启用的任务", 0.0
+                )
+            ]
+        return [
+            start_task_on(server, config, task, reporter, timeout) for task in tasks
+        ]
+
+    results: List[TaskOutcome] = []
+    for group in run_parallel(handle, targets, jobs):
+        results.extend(group)
+    _print_task_summary(results, "启动汇总", reporter)
+    return 0 if all(result.ok for result in results) else 1
+
+
+def cmd_stop(args: argparse.Namespace) -> int:
+    """结束远端后台任务。"""
+    config = _load_config_arg(args)
+    targets = select_servers(config, args.target or [], args.group or [], args.all)
+    jobs = _effective_jobs(args.jobs, config.jobs, len(targets))
+    timeout = _task_timeout(config, args, extra=60)
+    reporter = Reporter(args.verbose)
+
+    reporter.line(f"CPQS 后台任务结束 v{VERSION}")
+    reporter.line(f"目标数量 : {len(targets)}")
+    reporter.line(f"任务     : {', '.join(args.task) if args.task else '全部已启用任务'}")
+    reporter.line("")
+    _confirm_multi(targets, "结束后台任务", reporter, args.yes)
+
+    def handle(server: Server) -> List[TaskOutcome]:
+        try:
+            tasks = _tasks_for_server(server, config, args.task or [])
+        except DeployError as exc:
+            return [TaskOutcome(server, _placeholder_task(), False, "error", "", str(exc), 0.0)]
+        if not tasks:
+            return [
+                TaskOutcome(
+                    server, _placeholder_task(), True, "skipped", "", "没有启用的任务", 0.0
+                )
+            ]
+        return [
+            stop_task_on(server, config, task, reporter, timeout) for task in tasks
+        ]
+
+    results: List[TaskOutcome] = []
+    for group in run_parallel(handle, targets, jobs):
+        results.extend(group)
+    _print_task_summary(results, "结束汇总", reporter)
+    return 0 if all(result.ok for result in results) else 1
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    """查看远端后台任务状态。"""
+    config = _load_config_arg(args)
+    targets = select_servers(config, args.target or [], args.group or [], args.all)
+    jobs = _effective_jobs(args.jobs, config.jobs, len(targets))
+    timeout = _task_timeout(config, args)
+    reporter = Reporter(args.verbose)
+
+    reporter.line(f"CPQS 后台任务状态 v{VERSION}")
+    reporter.line(f"目标数量 : {len(targets)}")
+    reporter.line("")
+
+    def handle(server: Server) -> List[TaskOutcome]:
+        try:
+            tasks = _tasks_for_server(server, config, args.task or [])
+        except DeployError as exc:
+            return [TaskOutcome(server, _placeholder_task(), False, "error", "", str(exc), 0.0)]
+        if not tasks:
+            return [
+                TaskOutcome(
+                    server, _placeholder_task(), True, "skipped", "", "没有启用的任务", 0.0
+                )
+            ]
+        return status_tasks_on(server, config, tasks, reporter, timeout)
+
+    results: List[TaskOutcome] = []
+    for group in run_parallel(handle, targets, jobs):
+        results.extend(group)
+    _print_task_summary(results, "状态汇总", reporter)
+    return 0 if all(result.ok for result in results) else 1
+
+
+def cmd_restart(args: argparse.Namespace) -> int:
+    """重启远端后台任务（先结束再启动）。"""
+    config = _load_config_arg(args)
+    targets = select_servers(config, args.target or [], args.group or [], args.all)
+    jobs = _effective_jobs(args.jobs, config.jobs, len(targets))
+    timeout = _task_timeout(config, args, extra=60)
+    reporter = Reporter(args.verbose)
+
+    reporter.line(f"CPQS 后台任务重启 v{VERSION}")
+    reporter.line(f"目标数量 : {len(targets)}")
+    reporter.line(f"任务     : {', '.join(args.task) if args.task else '全部已启用任务'}")
+    reporter.line("")
+    _confirm_multi(targets, "重启后台任务", reporter, args.yes)
+
+    def handle(server: Server) -> List[TaskOutcome]:
+        try:
+            tasks = _tasks_for_server(server, config, args.task or [])
+        except DeployError as exc:
+            return [TaskOutcome(server, _placeholder_task(), False, "error", "", str(exc), 0.0)]
+        if not tasks:
+            return [
+                TaskOutcome(
+                    server, _placeholder_task(), True, "skipped", "", "没有启用的任务", 0.0
+                )
+            ]
+        outcomes: List[TaskOutcome] = []
+        for task in tasks:
+            outcomes.append(
+                stop_task_on(server, config, task, reporter, timeout)
+            )
+            if outcomes[-1].ok:
+                outcomes.append(
+                    start_task_on(server, config, task, reporter, timeout)
+                )
+        return outcomes
+
+    results: List[TaskOutcome] = []
+    for group in run_parallel(handle, targets, jobs):
+        results.extend(group)
+    _print_task_summary(results, "重启汇总", reporter)
+    return 0 if all(result.ok for result in results) else 1
 
 
 def _print_summary(results: Sequence, title: str, reporter: Reporter, dry_run: bool = False) -> None:
@@ -1208,6 +2014,17 @@ def cmd_list(args: argparse.Namespace) -> int:
             "source": str(config.source),
             "deploy_path": config.deploy_path,
             "key_path": str(config.key_path),
+            "tasks": [
+                {
+                    "name": task.name,
+                    "command": task.command,
+                    "cwd": task.cwd,
+                    "env": dict(task.env),
+                    "setup": task.setup,
+                    "stop_timeout": task.stop_timeout,
+                }
+                for task in resolve_tasks(config, config.servers[0])
+            ],
             "servers": [
                 {
                     "name": server.name,
@@ -1217,6 +2034,9 @@ def cmd_list(args: argparse.Namespace) -> int:
                     "group": server.group,
                     "deploy_path": server.deploy_path,
                     "key_path": str(server.key_path),
+                    "tasks": [
+                        task.name for task in resolve_tasks(config, server)
+                    ],
                 }
                 for server in config.servers
             ],
@@ -1231,13 +2051,14 @@ def cmd_list(args: argparse.Namespace) -> int:
     print()
     print(
         f"{'名称':<22} {'用户':<10} {'主机':<24} {'端口':>5}  "
-        f"{'分组':<10} 部署路径"
+        f"{'分组':<10} {'后台任务':<16} 部署路径"
     )
     print("-" * 100)
     for server in config.servers:
+        task_names = ",".join(task.name for task in resolve_tasks(config, server))
         print(
             f"{server.name:<22} {server.user:<10} {server.host:<24} "
-            f"{server.port:>5}  {server.group:<10} {server.deploy_path}"
+            f"{server.port:>5}  {server.group:<10} {task_names:<16} {server.deploy_path}"
         )
     print("-" * 100)
     print(f"共 {len(config.servers)} 台服务器")
@@ -1319,6 +2140,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 reporter,
                 args.dry_run,
                 timeout,
+                args.restart_tasks,
             ),
             targets,
             jobs,
@@ -1369,9 +2191,13 @@ def build_parser() -> argparse.ArgumentParser:
             "示例:\n"
             "  py deploy.py list\n"
             "  py deploy.py check --all\n"
-            "  py deploy.py deploy --target xfusion-1011 --dry-run\n"
+            "  py deploy.py deploy --target X1 --dry-run\n"
             "  py deploy.py deploy --group xfusion\n"
             "  py deploy.py deploy --all\n"
+            "  py deploy.py deploy --all --restart-tasks   # 部署后重启 collector\n"
+            "  py deploy.py start --all                    # 后台启动 metrics_exporter.py\n"
+            "  py deploy.py status --target X1\n"
+            "  py deploy.py stop --all                     # 结束后台任务\n"
         ),
     )
     parser.add_argument(
@@ -1473,7 +2299,51 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="把生成的 tar.gz 保存到指定文件或目录",
     )
+    deploy_parser.add_argument(
+        "--restart-tasks",
+        action="store_true",
+        help="部署成功后重启该服务器上的后台任务（如 collector）",
+    )
     deploy_parser.set_defaults(func=cmd_deploy)
+
+    for name, help_text, func in (
+        ("start", "在远端后台启动任务（如 metrics_exporter.py）", cmd_start),
+        ("stop", "结束远端后台任务", cmd_stop),
+        ("restart", "重启远端后台任务", cmd_restart),
+        ("status", "查看远端后台任务状态", cmd_status),
+    ):
+        task_parser = subparsers.add_parser(
+            name,
+            parents=[common],
+            help=help_text,
+        )
+        _add_selection(task_parser)
+        task_parser.add_argument(
+            "--task",
+            action="append",
+            default=[],
+            metavar="NAME",
+            help="指定任务名，可重复使用；不填则处理全部已启用任务",
+        )
+        task_parser.add_argument(
+            "--jobs",
+            type=int,
+            default=None,
+            help="并发数（默认取配置中的 jobs）",
+        )
+        task_parser.add_argument(
+            "--timeout",
+            type=int,
+            default=None,
+            help="单台操作超时秒数（默认 connect_timeout + 30）",
+        )
+        task_parser.add_argument(
+            "-y",
+            "--yes",
+            action="store_true",
+            help="多台服务器时跳过交互确认",
+        )
+        task_parser.set_defaults(func=func)
 
     return parser
 
