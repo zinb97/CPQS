@@ -14,7 +14,8 @@
 - 通过 `tar.gz` 流式传输，适合 Windows 本地环境；
 - 默认不删除远端已有文件，避免误删日志、配置或虚拟环境；
 - 从 git 索引读取文件权限，Windows 上也能保留脚本的可执行位；
-- **可在远端后台拉起常驻进程**（如 `metrics_exporter.py`），并随时结束、查看状态。
+- **可在远端后台拉起常驻进程**（如 `metrics_exporter.py`），并随时结束、查看状态；
+- 分组写在 `servers.json` 顶层的 `group` 段，可用 `deploy.py group ...` 增删改（不必手改 JSON）。
 
 ## 目录结构
 
@@ -74,6 +75,11 @@ py deploy-tool\deploy.py start --all
 # 8. 查看/结束远端后台任务
 py deploy-tool\deploy.py status --target D1
 py deploy-tool\deploy.py stop --all
+
+# 9. 查看分组、维护分组（写回 servers.json）
+py deploy-tool\deploy.py group list
+py deploy-tool\deploy.py group add demo X1 X2
+py deploy-tool\deploy.py group add demo X3 --dry-run   # 只显示结果，不写文件
 ```
 
 也可以使用 PowerShell 启动器：
@@ -94,7 +100,7 @@ py deploy-tool\deploy.py stop --all
 |------|------|
 | `--all` | 选择全部服务器 |
 | `--target NAME` | 按名称选择，可重复 |
-| `--group GROUP` | 按分组选择，可重复 |
+| `--group GROUP` | 按顶层 `group` 段的分组选择，可重复（多组取并集） |
 | `--dry-run` | 只打包和预检，不上传 |
 | `--exclude PATTERN` | 追加排除规则，可重复 |
 | `--jobs N` | 并发数，默认取配置中的 `jobs` |
@@ -115,8 +121,6 @@ py deploy-tool\deploy.py stop --all
 | `X3` | xfusion | S501.site | 1013 | xfusion | `/opt/CPQS` | collector |
 | `X4` | xfusion | S501.site | 1014 | xfusion | `/opt/CPQS` | collector |
 | `X5` | xfusion | S501.site | 1015 | xfusion | `/opt/CPQS` | collector |
-| `X6` | xfusion | S501.site | 1016 | xfusion | `/opt/CPQS` | collector |
-| `X7` | xfusion | S501.site | 1016 | xfusion | `/opt/CPQS` | collector |
 | `L1` | hello | S501.site | 1021 | hello | `/opt/CPQS` | collector |
 | `L2` | hello | S501.site | 1022 | hello | `/opt/CPQS` | collector |
 | `L3` | hello | S501.site | 1023 | hello | `/opt/CPQS` | collector |
@@ -124,6 +128,7 @@ py deploy-tool\deploy.py stop --all
 | `D1` | lab | 192.168.10.31 | 22 | u | `/opt/CPQS` | collector |
 
 > 表内容以 `deploy.py list` 的实时输出为准；`--target` 填的是这里的**名称**。
+> 「分组」一列来自 `servers.json` 顶层的 `group` 段（见[分组管理](#分组管理)），一台服务器可以同时属于多个分组。
 
 ## 配置说明
 
@@ -140,6 +145,7 @@ py deploy-tool\deploy.py stop --all
 | `strict_host_key_checking` | 否 | `accept-new` | `yes` / `no` / `ask` / `accept-new` |
 | `exclude` | 否 | `[]` | 额外排除规则数组，与 `.deployignore` 叠加 |
 | `tasks` | 否 | 内置 `collector` | 后台任务定义，见「后台任务」一节 |
+| `group` | 否 | `{}` | 分组表：`{"组名": ["服务器名", ...]}`，见[分组管理](#分组管理) |
 | `servers` | 是 | — | 服务器数组，不能为空 |
 
 每个服务器对象：
@@ -150,7 +156,6 @@ py deploy-tool\deploy.py stop --all
 | `host` | 是 | 主机名或 IP |
 | `port` | 否 | SSH 端口，默认 22 |
 | `user` | 是 | SSH 用户 |
-| `group` | 否 | 分组名，供 `--group` 使用 |
 | `deploy_path` | 否 | 覆盖全局部署路径 |
 | `key_path` | 否 | 覆盖全局私钥路径 |
 | `tasks` | 否 | 该服务器私有的任务定义，字段级覆盖全局 `tasks` |
@@ -160,12 +165,61 @@ py deploy-tool\deploy.py stop --all
 ```json
 {
   "name": "demo-2201",
-  "group": "demo",
   "host": "demo.example.com",
   "port": 2201,
   "user": "demo"
 }
 ```
+
+再把它加入分组（`group` 段与 `servers` 平级）：
+
+```json
+"group": {
+  "demo": ["demo-2201"]
+}
+```
+
+## 分组管理
+
+分组统一写在 `servers.json` **顶层**的 `group` 段，键是分组名、值是该组的服务器名称数组：
+
+```json
+"group": {
+  "g1": ["X1", "X2"],
+  "g2": ["X3", "X4"]
+}
+```
+
+- 成员名必须能在 `servers` 里找到，写错会直接报错（不会静默忽略）；
+- 一台服务器可以出现在多个分组里，`--group` 同时选多个分组时取并集；
+- 分组名不能包含空白或逗号（逗号用于在列表里连接多个分组名）。
+
+日常用 `group` 子命令维护即可，不必手改 JSON：
+
+| 命令 | 作用 |
+|------|------|
+| `group list [--json]` | 列出所有分组、成员，以及未分组的服务器 |
+| `group add GROUP [SERVER...]` | 新建分组，或把服务器追加进分组（重复的会跳过） |
+| `group remove GROUP SERVER...` | 把服务器移出分组；分组保留，可能变成空分组 |
+| `group set GROUP [SERVER...]` | 用给定服务器整体覆盖分组；不写服务器表示清空该分组 |
+| `group delete GROUP...` | 删除分组（只删分组，不动 `servers` 里的服务器） |
+
+```powershell
+py deploy-tool\deploy.py group list
+py deploy-tool\deploy.py group add g1 X1 X2
+py deploy-tool\deploy.py group add g1 X3 --dry-run   # 只显示结果，不写文件
+py deploy-tool\deploy.py group remove g1 X1
+py deploy-tool\deploy.py group set g2 X3 X4
+py deploy-tool\deploy.py group delete g2
+```
+
+写回行为：
+
+- **原子写入**：先写临时文件、用正式解析器校验通过后 `os.replace` 覆盖 `servers.json`，不会留下半截文件；
+- **格式化**：保持 2 空格缩进，`group` 段一行一个分组，其余字段顺序不变，diff 干净；
+- `--group` 选择到的空分组会报「分组没有成员」，避免把“没选中任何机器”误当成成功。
+
+> 兼容旧配置：早期版本把分组写在 `servers[].group`（一台机器一个分组）。这种写法仍能读，加载时会并入分组表并给出告警；执行任意会写文件的 `group` 子命令后，该字段会被迁移到顶层 `group` 段并删除。
 
 ## 排除规则
 

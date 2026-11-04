@@ -18,6 +18,8 @@
     py deploy.py deploy --all
     py deploy.py start --all            # 远端后台启动 metrics_exporter.py
     py deploy.py stop --all             # 结束远端后台任务
+    py deploy.py group list             # 查看分组
+    py deploy.py group add g1 X1 X2     # 新建/追加分组
 """
 
 from __future__ import annotations
@@ -40,7 +42,7 @@ import tarfile
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -176,7 +178,7 @@ class Server:
     user: str
     deploy_path: str
     key_path: Path
-    group: str = ""
+    groups: Tuple[str, ...] = ()
     task_layers: Tuple[Tuple[str, Dict[str, object]], ...] = ()
 
     @property
@@ -204,6 +206,8 @@ class Config:
     exclude: Tuple[str, ...]
     servers: Tuple[Server, ...]
     task_layers: Tuple[Tuple[str, Dict[str, object]], ...] = ()
+    groups: Tuple[Tuple[str, Tuple[str, ...]], ...] = ()
+    warnings: Tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -407,8 +411,185 @@ def task_marker(command: str) -> str:
     return tokens[0]
 
 
-def load_config(path: Path) -> Config:
-    path = path.expanduser().resolve(strict=False)
+# ---------------------------------------------------------------------------
+# 分组
+# ---------------------------------------------------------------------------
+
+GROUP_KEY = "group"
+GROUP_ALIAS_KEY = "groups"
+# 逗号用于在表格/日志里连接多个分组名，空白会让命令行传参无法区分。
+GROUP_NAME_FORBIDDEN = re.compile(r"[\s,]")
+
+
+def _validate_group_name(value: object, where: str) -> str:
+    if not isinstance(value, str):
+        raise DeployError(f"{where} 必须是字符串")
+    name = value.strip()
+    if not name:
+        raise DeployError(f"{where} 不能为空")
+    if name.startswith("-"):
+        raise DeployError(f"{where} 不能以 - 开头: {name!r}")
+    if GROUP_NAME_FORBIDDEN.search(name):
+        raise DeployError(f"{where} 不能包含空白或逗号: {name!r}")
+    return name
+
+
+def _group_map_from_raw(
+    raw: Dict[str, object], servers: Sequence[Server]
+) -> Tuple[Dict[str, List[str]], List[str]]:
+    """从原始 JSON 中取出「分组名 -> 服务器名列表」，保持文件里的顺序。
+
+    新格式::
+
+        {"group": {"g1": ["X1", "X2"], "g2": ["X3", "X4"]}}
+
+    旧格式 ``servers[].group``（一台服务器只能属于一个分组）仍然兼容：
+    合并进分组表并给出告警，``group`` 子命令写回时会把该字段清掉。
+    """
+    if GROUP_KEY in raw and GROUP_ALIAS_KEY in raw:
+        raise DeployError(
+            f'servers.json 中 "{GROUP_KEY}" 与 "{GROUP_ALIAS_KEY}" 不能同时出现，'
+            f'请只保留 "{GROUP_KEY}"'
+        )
+
+    known = {server.name for server in servers}
+    groups: Dict[str, List[str]] = {}
+    section = raw.get(GROUP_KEY, raw.get(GROUP_ALIAS_KEY))
+    if section is not None:
+        if not isinstance(section, dict):
+            raise DeployError(f'{GROUP_KEY} 必须是 JSON 对象，形如 {{"g1": ["X1", "X2"]}}')
+        for key, value in section.items():
+            name = _validate_group_name(key, f"{GROUP_KEY} 的分组名")
+            if name in groups:
+                raise DeployError(f"{GROUP_KEY} 中分组名重复: {name}")
+            if not isinstance(value, list) or not all(
+                isinstance(item, str) for item in value
+            ):
+                raise DeployError(
+                    f'{GROUP_KEY}.{name} 必须是服务器名称数组，形如 ["X1", "X2"]'
+                )
+            members: List[str] = []
+            for item in value:
+                member = item.strip()
+                if not member:
+                    raise DeployError(f"{GROUP_KEY}.{name} 含空的服务器名")
+                if member not in known:
+                    raise DeployError(
+                        f"{GROUP_KEY}.{name} 引用了不存在的服务器: {member!r}"
+                    )
+                if member not in members:
+                    members.append(member)
+            groups[name] = members
+
+    legacy: List[Tuple[str, str]] = []
+    raw_servers = raw.get("servers")
+    if isinstance(raw_servers, list):
+        for index, item in enumerate(raw_servers, start=1):
+            if not isinstance(item, dict) or GROUP_KEY not in item:
+                continue
+            value = item[GROUP_KEY]
+            if value is None or (isinstance(value, str) and not value.strip()):
+                continue
+            if index > len(servers):
+                continue
+            legacy.append(
+                (
+                    servers[index - 1].name,
+                    _validate_group_name(value, f"servers[{index}].group"),
+                )
+            )
+
+    warnings: List[str] = []
+    if legacy:
+        affected = ", ".join(sorted({name for name, _ in legacy}))
+        warnings.append(
+            'servers[].group 已废弃：分组请统一写在顶层 "group" 段'
+            f"（受影响服务器: {affected}）；本次仍按旧字段归组，"
+            "执行任意 group 子命令写回后该字段会被清除"
+        )
+    for server_name, group_name in legacy:
+        members = groups.setdefault(group_name, [])
+        if server_name not in members:
+            members.append(server_name)
+
+    return groups, warnings
+
+
+def _with_group_section(
+    raw: Dict[str, object], groups: Dict[str, List[str]]
+) -> Dict[str, object]:
+    """把分组表写回原始 JSON，并让 "group" 段排在 "servers" 之前。"""
+    section = {name: list(members) for name, members in groups.items()}
+    result: Dict[str, object] = {}
+    placed = False
+    for key, value in raw.items():
+        if key in (GROUP_KEY, GROUP_ALIAS_KEY):
+            if not placed:
+                result[GROUP_KEY] = section
+                placed = True
+            continue
+        if key == "servers" and not placed:
+            result[GROUP_KEY] = section
+            placed = True
+        result[key] = value
+    if not placed:
+        result[GROUP_KEY] = section
+    return result
+
+
+def _strip_legacy_server_groups(raw: Dict[str, object]) -> None:
+    """删掉旧版 servers[].group 字段（分组只保留在顶层 group 段）。"""
+    raw_servers = raw.get("servers")
+    if not isinstance(raw_servers, list):
+        return
+    for item in raw_servers:
+        if isinstance(item, dict):
+            item.pop(GROUP_KEY, None)
+
+
+GROUP_PLACEHOLDER = "@@CPQS_GROUP_SECTION@@"
+
+
+def _format_group_section(groups: Dict[str, List[str]], indent: int = 4) -> str:
+    """把分组表格式化成一行一个分组，避免每个成员名独占一行。"""
+    if not groups:
+        return "{}"
+    items = list(groups.items())
+    inner = " " * indent
+    outer = " " * max(indent - 2, 0)
+    lines = ["{"]
+    for index, (name, members) in enumerate(items):
+        members_text = "[" + ", ".join(
+            json.dumps(member, ensure_ascii=False) for member in members
+        ) + "]"
+        comma = "," if index < len(items) - 1 else ""
+        lines.append(
+            f"{inner}{json.dumps(name, ensure_ascii=False)}: {members_text}{comma}"
+        )
+    lines.append(outer + "}")
+    return "\n".join(lines)
+
+
+def _serialize_config(raw: Dict[str, object]) -> str:
+    """序列化为 2 空格缩进的 JSON，"group" 段保持紧凑（一行一个分组）。"""
+    if GROUP_KEY not in raw:
+        return json.dumps(raw, ensure_ascii=False, indent=2) + "\n"
+
+    groups = raw[GROUP_KEY]
+    if not isinstance(groups, dict):
+        # 走到这里说明调用方没做校验，交给正常路径报错。
+        return json.dumps(raw, ensure_ascii=False, indent=2) + "\n"
+
+    placeholder = dict(raw)
+    placeholder[GROUP_KEY] = GROUP_PLACEHOLDER
+    text = json.dumps(placeholder, ensure_ascii=False, indent=2)
+    prefix = f'{json.dumps(GROUP_KEY, ensure_ascii=False)}: '
+    target = prefix + json.dumps(GROUP_PLACEHOLDER, ensure_ascii=False)
+    text = text.replace(target, prefix + _format_group_section(groups), 1)
+    return text + "\n"
+
+
+def _load_raw_config(path: Path) -> Dict[str, object]:
     try:
         raw_text = path.read_text(encoding="utf-8-sig")
     except FileNotFoundError as exc:
@@ -425,6 +606,39 @@ def load_config(path: Path) -> Config:
 
     if not isinstance(raw, dict):
         raise DeployError("配置文件根节点必须是 JSON 对象")
+    return raw
+
+
+def _write_config(path: Path, raw: Dict[str, object]) -> None:
+    """原子写入 servers.json：先写临时文件并用正式解析器验证，再替换原文件。"""
+    text = _serialize_config(raw)
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError:
+        mode = 0o644
+
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+        os.chmod(temp_path, mode)
+        # 用正式加载器校验新内容，避免写出一个 deploy.py 自己都读不了的配置。
+        load_config(temp_path)
+        os.replace(temp_path, path)
+    except BaseException:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def load_config(path: Path) -> Config:
+    path = path.expanduser().resolve(strict=False)
+    raw = _load_raw_config(path)
 
     base = path.parent
     source = _resolve_path(raw.get("source", ".."), base, "source")
@@ -499,7 +713,6 @@ def load_config(path: Path) -> Config:
             if "key_path" in item
             else key_path
         )
-        group = str(item.get("group", "")).strip()
         server_task_layers = _parse_task_layers(
             item.get("tasks"), f"servers[{index}].tasks"
         )
@@ -512,10 +725,19 @@ def load_config(path: Path) -> Config:
                 user=user,
                 deploy_path=server_deploy_path,
                 key_path=server_key,
-                group=group,
                 task_layers=server_task_layers,
             )
         )
+
+    groups, warnings = _group_map_from_raw(raw, servers)
+    membership: Dict[str, List[str]] = {}
+    for group_name, members in groups.items():
+        for member in members:
+            membership.setdefault(member, []).append(group_name)
+    servers = [
+        replace(server, groups=tuple(membership.get(server.name, ())))
+        for server in servers
+    ]
 
     return Config(
         path=path,
@@ -529,6 +751,10 @@ def load_config(path: Path) -> Config:
         exclude=tuple(item.strip() for item in raw_exclude if item.strip()),
         servers=tuple(servers),
         task_layers=task_layers,
+        groups=tuple(
+            (group_name, tuple(members)) for group_name, members in groups.items()
+        ),
+        warnings=tuple(warnings),
     )
 
 
@@ -554,17 +780,29 @@ def select_servers(
     if unknown_names:
         raise DeployError(f"未知服务器名称: {', '.join(sorted(unknown_names))}")
 
-    known_groups = {server.group for server in config.servers if server.group}
+    known_groups = {group_name for group_name, _ in config.groups}
     unknown_groups = wanted_groups - known_groups
     if unknown_groups:
-        raise DeployError(f"未知分组: {', '.join(sorted(unknown_groups))}")
+        available = ", ".join(sorted(known_groups)) or "（尚未定义任何分组）"
+        raise DeployError(
+            f"未知分组: {', '.join(sorted(unknown_groups))}；现有分组: {available}"
+        )
 
+    group_lookup = dict(config.groups)
+    members = {
+        member
+        for group_name in wanted_groups
+        for member in group_lookup[group_name]
+    }
     selected = [
         server
         for server in config.servers
-        if server.name in wanted_names or (server.group and server.group in wanted_groups)
+        if server.name in wanted_names or server.name in members
     ]
     if not selected:
+        empty = sorted(name for name in wanted_groups if not group_lookup[name])
+        if empty and not wanted_names:
+            raise DeployError(f"分组没有成员: {', '.join(empty)}")
         raise DeployError("没有匹配到任何服务器")
     return selected
 
@@ -1977,12 +2215,16 @@ def _print_summary(results: Sequence, title: str, reporter: Reporter, dry_run: b
 # ---------------------------------------------------------------------------
 
 
-def _load_config_arg(args: argparse.Namespace) -> Config:
+def _config_path_arg(args: argparse.Namespace) -> Path:
     raw = args.config
     if raw is None:
         env_path = os.environ.get("CPQS_DEPLOY_CONFIG")
         raw = Path(env_path) if env_path else DEFAULT_CONFIG_PATH
-    return load_config(Path(raw))
+    return Path(raw).expanduser().resolve(strict=False)
+
+
+def _load_config_arg(args: argparse.Namespace) -> Config:
+    return load_config(_config_path_arg(args))
 
 
 def _resolve_source(args: argparse.Namespace, config: Config) -> Path:
@@ -2017,12 +2259,15 @@ def _save_archive(archive: ArchiveInfo, destination: Path, reporter: Reporter) -
 
 def cmd_list(args: argparse.Namespace) -> int:
     config = _load_config_arg(args)
+    groups = {name: list(members) for name, members in config.groups}
     if args.json:
         payload = {
             "config": str(config.path),
             "source": str(config.source),
             "deploy_path": config.deploy_path,
             "key_path": str(config.key_path),
+            "groups": groups,
+            "warnings": list(config.warnings),
             "tasks": [
                 {
                     "name": task.name,
@@ -2040,7 +2285,7 @@ def cmd_list(args: argparse.Namespace) -> int:
                     "host": server.host,
                     "port": server.port,
                     "user": server.user,
-                    "group": server.group,
+                    "groups": list(server.groups),
                     "deploy_path": server.deploy_path,
                     "key_path": str(server.key_path),
                     "tasks": [
@@ -2058,20 +2303,178 @@ def cmd_list(args: argparse.Namespace) -> int:
     print(f"部署路径 : {config.deploy_path}")
     print(f"私钥     : {config.key_path}")
     print()
+    labels = [",".join(server.groups) for server in config.servers]
+    group_width = max([10] + [len(label) for label in labels])
     print(
         f"{'名称':<22} {'用户':<10} {'主机':<24} {'端口':>5}  "
-        f"{'分组':<10} {'后台任务':<16} 部署路径"
+        f"{'分组':<{group_width}} {'后台任务':<16} 部署路径"
     )
     print("-" * 100)
-    for server in config.servers:
+    for server, label in zip(config.servers, labels):
         task_names = ",".join(task.name for task in resolve_tasks(config, server))
         print(
             f"{server.name:<22} {server.user:<10} {server.host:<24} "
-            f"{server.port:>5}  {server.group:<10} {task_names:<16} {server.deploy_path}"
+            f"{server.port:>5}  {label:<{group_width}} {task_names:<16} {server.deploy_path}"
         )
     print("-" * 100)
-    print(f"共 {len(config.servers)} 台服务器")
+    print(f"共 {len(config.servers)} 台服务器，{len(config.groups)} 个分组")
+    for warning in config.warnings:
+        print(f"注意: {warning}")
     return 0
+
+
+def _group_members_text(members: Sequence[str]) -> str:
+    return ", ".join(members) if members else "（空）"
+
+
+def _clean_server_names(values: Sequence[str], config: Config) -> List[str]:
+    known = {server.name for server in config.servers}
+    names: List[str] = []
+    unknown: List[str] = []
+    for value in values:
+        name = value.strip()
+        if not name or name in names:
+            continue
+        if name not in known:
+            unknown.append(name)
+            continue
+        names.append(name)
+    if unknown:
+        available = ", ".join(server.name for server in config.servers)
+        raise DeployError(f"不存在的服务器: {', '.join(unknown)}；可用名称: {available}")
+    return names
+
+
+def cmd_group_list(args: argparse.Namespace) -> int:
+    config = _load_config_arg(args)
+    groups = {name: list(members) for name, members in config.groups}
+    ungrouped = [server.name for server in config.servers if not server.groups]
+    if args.json:
+        payload = {
+            "config": str(config.path),
+            "group": groups,
+            "ungrouped": ungrouped,
+            "warnings": list(config.warnings),
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    by_name = {server.name: server for server in config.servers}
+    print(f"配置文件 : {config.path}")
+    print()
+    if not groups:
+        print("（还没有定义任何分组，可用 group add GROUP SERVER... 新建）")
+        print()
+    for name, members in groups.items():
+        print(f"{name}（{len(members)} 台）")
+        if not members:
+            print("  （空分组）")
+        for member in members:
+            server = by_name.get(member)
+            endpoint = server.endpoint if server else "不在 servers 中"
+            print(f"  - {member:<24} {endpoint}")
+        print()
+    if ungrouped:
+        print(f"未分组（{len(ungrouped)} 台）")
+        for name in ungrouped:
+            print(f"  - {name:<24} {by_name[name].endpoint}")
+        print()
+    for warning in config.warnings:
+        print(f"注意: {warning}")
+    return 0
+
+
+def _update_groups(args: argparse.Namespace, action: str) -> int:
+    """group add/remove/set/delete 的共同实现：改内存里的分组表，再原子写回 JSON。"""
+    path = _config_path_arg(args)
+    config = load_config(path)
+    raw = _load_raw_config(path)
+    groups, _warnings = _group_map_from_raw(raw, config.servers)
+
+    detail: List[str] = []
+    changed = False
+
+    if action == "delete":
+        targets: List[str] = []
+        for value in args.groups:
+            name = _validate_group_name(value, "分组名")
+            if name not in groups:
+                available = ", ".join(groups) or "（无）"
+                raise DeployError(f"分组不存在: {name}；现有分组: {available}")
+            if name not in targets:
+                targets.append(name)
+        for name in targets:
+            groups.pop(name)
+        changed = bool(targets)
+        detail.append(f"已删除分组: {', '.join(targets)}")
+    else:
+        name = _validate_group_name(args.group, "分组名")
+        servers = _clean_server_names(args.servers, config)
+        if action == "remove" and name not in groups:
+            available = ", ".join(groups) or "（无）"
+            raise DeployError(f"分组不存在: {name}；现有分组: {available}")
+        if action == "remove" and not servers:
+            raise DeployError("remove 需要至少一个服务器名；要删除整个分组请用 group delete")
+
+        existed = name in groups
+        before = list(groups.get(name, []))
+        if action == "add":
+            after = before + [item for item in servers if item not in before]
+        elif action == "remove":
+            after = [item for item in before if item not in servers]
+        else:  # set
+            after = list(servers)
+
+        added = [item for item in after if item not in before]
+        removed = [item for item in before if item not in after]
+        if not existed:
+            groups[name] = after
+            changed = True
+            detail.append(f"新建分组 {name}: {_group_members_text(after)}")
+        elif added or removed:
+            groups[name] = after
+            changed = True
+            parts: List[str] = []
+            if added:
+                parts.append(f"加入 {', '.join(added)}")
+            if removed:
+                parts.append(f"移出 {', '.join(removed)}")
+            detail.append(f"分组 {name}: " + "；".join(parts))
+        detail.append(f"分组 {name} 现有成员: {_group_members_text(after)}")
+
+    if not changed:
+        print("分组没有变化，配置文件未改动。")
+        return 0
+
+    for line in detail:
+        print(line)
+    new_raw = _with_group_section(raw, groups)
+    _strip_legacy_server_groups(new_raw)
+
+    if args.dry_run:
+        print("（dry-run：未写入配置文件，写入后的分组表如下）")
+        print(_format_group_section(groups, indent=2))
+        return 0
+
+    _write_config(path, new_raw)
+    print(f"配置文件已更新: {path}")
+    return 0
+
+
+def cmd_group_add(args: argparse.Namespace) -> int:
+    return _update_groups(args, "add")
+
+
+def cmd_group_remove(args: argparse.Namespace) -> int:
+    return _update_groups(args, "remove")
+
+
+def cmd_group_set(args: argparse.Namespace) -> int:
+    return _update_groups(args, "set")
+
+
+def cmd_group_delete(args: argparse.Namespace) -> int:
+    return _update_groups(args, "delete")
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -2207,6 +2610,10 @@ def build_parser() -> argparse.ArgumentParser:
             "  py deploy.py start --all                    # 后台启动 metrics_exporter.py\n"
             "  py deploy.py status --target X1\n"
             "  py deploy.py stop --all                     # 结束后台任务\n"
+            "  py deploy.py group list\n"
+            "  py deploy.py group add lab D1 D2\n"
+            "  py deploy.py group set xfusion X1 X2 X3\n"
+            "  py deploy.py group delete lab\n"
         ),
     )
     parser.add_argument(
@@ -2239,10 +2646,83 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser.add_argument("--json", action="store_true", help="以 JSON 输出")
     list_parser.set_defaults(func=cmd_list)
 
+    group_parser = subparsers.add_parser(
+        "group",
+        help="查看或修改服务器分组（servers.json 顶层 group 段）",
+        description=(
+            "查看或修改 servers.json 顶层的 group 段，形如 "
+            '{"group": {"g1": ["X1", "X2"], "g2": ["X3"]}}。'
+        ),
+    )
+    group_sub = group_parser.add_subparsers(dest="group_action", required=True)
+
+    group_list = group_sub.add_parser(
+        "list",
+        parents=[common],
+        help="列出分组及其成员",
+    )
+    group_list.add_argument("--json", action="store_true", help="以 JSON 输出")
+    group_list.set_defaults(func=cmd_group_list)
+
+    group_add = group_sub.add_parser(
+        "add",
+        parents=[common],
+        help="新建分组，或把服务器追加进分组",
+    )
+    group_add.add_argument("group", help="分组名")
+    group_add.add_argument(
+        "servers", nargs="*", metavar="SERVER", help="服务器名称，可写多个"
+    )
+    group_add.add_argument(
+        "--dry-run", action="store_true", help="只显示结果，不写配置文件"
+    )
+    group_add.set_defaults(func=cmd_group_add)
+
+    group_remove = group_sub.add_parser(
+        "remove",
+        parents=[common],
+        help="把服务器移出分组（分组本身保留）",
+    )
+    group_remove.add_argument("group", help="分组名")
+    group_remove.add_argument(
+        "servers", nargs="+", metavar="SERVER", help="服务器名称，可写多个"
+    )
+    group_remove.add_argument(
+        "--dry-run", action="store_true", help="只显示结果，不写配置文件"
+    )
+    group_remove.set_defaults(func=cmd_group_remove)
+
+    group_set = group_sub.add_parser(
+        "set",
+        parents=[common],
+        help="用给定服务器整体覆盖分组（不写服务器则清空分组）",
+    )
+    group_set.add_argument("group", help="分组名")
+    group_set.add_argument(
+        "servers", nargs="*", metavar="SERVER", help="服务器名称，可写多个；不写表示清空"
+    )
+    group_set.add_argument(
+        "--dry-run", action="store_true", help="只显示结果，不写配置文件"
+    )
+    group_set.set_defaults(func=cmd_group_set)
+
+    group_delete = group_sub.add_parser(
+        "delete",
+        parents=[common],
+        help="删除分组",
+    )
+    group_delete.add_argument(
+        "groups", nargs="+", metavar="GROUP", help="分组名，可写多个"
+    )
+    group_delete.add_argument(
+        "--dry-run", action="store_true", help="只显示结果，不写配置文件"
+    )
+    group_delete.set_defaults(func=cmd_group_delete)
+
     check_parser = subparsers.add_parser(
         "check",
         parents=[common],
-        help="检查 SSH 登录、目标目录和 tar",
+        help="检查 SSH 登录、目标目录、tar 和 /usr/bin/python3",
     )
     _add_selection(check_parser)
     check_parser.add_argument(

@@ -3,10 +3,17 @@
   "key_path": "~/.ssh/id_rsa",
   "source": "..",
   "connect_timeout": 10,
-  "jobs": 4,
+  "jobs": 5,
   "timeout": 900,
   "strict_host_key_checking": "accept-new",
   "exclude": [],
+  "group": {
+    "dep": ["X1", "X2", "X3", "X4", "X5", "L1", "L2", "L3", "L4"],
+    "exe": ["X1", "X2", "X3", "X4", "X5", "L1", "L2", "L3", "L4", "D1"],
+    "xfusion": ["X1", "X2", "X3", "X4", "X5"],
+    "hello": ["L1", "L2", "L3", "L4"],
+    "lab": ["D1"]
+  },
   "tasks": {
     "collector": {
       "command": "/usr/bin/python3 metrics_exporter.py --port 9100",
@@ -20,70 +27,60 @@
   "servers": [
     {
       "name": "X1",
-      "group": "xfusion",
       "host": "S501.site",
       "port": 1011,
       "user": "xfusion"
     },
     {
       "name": "X2",
-      "group": "xfusion",
       "host": "S501.site",
       "port": 1012,
       "user": "xfusion"
     },
     {
       "name": "X3",
-      "group": "xfusion",
       "host": "S501.site",
       "port": 1013,
       "user": "xfusion"
     },
     {
       "name": "X4",
-      "group": "xfusion",
       "host": "S501.site",
       "port": 1014,
       "user": "xfusion"
     },
     {
       "name": "X5",
-      "group": "xfusion",
       "host": "S501.site",
       "port": 1015,
       "user": "xfusion"
     },
     {
       "name": "L1",
-      "group": "hello",
       "host": "S501.site",
       "port": 1021,
       "user": "hello"
     },
     {
       "name": "L2",
-      "group": "hello",
       "host": "S501.site",
       "port": 1022,
       "user": "hello"
     },
     {
       "name": "L3",
-      "group": "hello",
       "host": "S501.site",
       "port": 1023,
       "user": "hello"
     },
     {
       "name": "L4",
-      "group": "hello",
       "host": "S501.site",
       "port": 1024,
       "user": "hello"
     },
     {
       "name": "D1",
-      "group": "lab",
       "host": "192.168.10.31",
       "port": 22,
       "user": "u"
