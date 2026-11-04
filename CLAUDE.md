@@ -103,7 +103,7 @@ python3 deploy-tool/deploy.py deploy --target D1 --dry-run
 
 - 路由分层：
   - `routers/dashboard.py` — `GET /`
-  - `routers/resource.py` — 资源管控中心**原生页面**（`/resource` 重定向到 `/resource/clusters`，另有 cluster/host 详情页与 `/resource/iframe`）
+  - `routers/resource.py` — 资源管控中心**原生页面**（`/resource` 重定向到 `/resource/clusters`，另有 cluster/host 详情页）
   - `routers/shells.py` — **4 个** iframe 壳：`/network`、`/task`、`/telemetry`、`/compute`（`/resource` 已不在此列）
   - `routers/api.py` — **10 个** JSON 端点（prefix `/api/metrics`）：`overview`、`bandwidth`、`map`、`links`、**`qos`**、`events`、以及资源管控用的 `clusters`、`clusters/{cluster_id}`、`hosts/{instance:path}/timeseries`、`hosts/{instance:path}`
 - `GET /api/metrics/qos` 返回**网络 QoS 六维评分**（时延/抖动/丢包/可用性/带宽余量/抗扰动），每个维度带 `measured` 标志区分实测值与占位值。抖动无对应指标，用链路时延标准差代理；带宽余量以 `Settings.network_rated_mbps` 为基准（控制器只上报占用、不含链路额定速率）

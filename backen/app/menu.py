@@ -77,14 +77,6 @@ _CLUSTERS_SVG = (
     '<rect x="14" y="14" width="7" height="7" rx="1"/>'
     "</svg>"
 )
-_GRAFANA_SVG = (
-    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'
-    '<polyline points="3 17 9 11 13 15 21 7"/>'
-    '<polyline points="14 7 21 7 21 14"/>'
-    "</svg>"
-)
-
-
 MENU_ITEMS: list[MenuItem] = [
     {"id": "dashboard", "label": "态势总览大屏", "path": "/", "icon": _DASHBOARD_SVG},
     {
@@ -94,7 +86,6 @@ MENU_ITEMS: list[MenuItem] = [
         "icon": _RESOURCE_SVG,
         "children": [
             {"id": "clusters", "label": "集群列表", "path": "/resource/clusters", "icon": _CLUSTERS_SVG},
-            {"id": "resource_iframe", "label": "Grafana 总览", "path": "/resource/iframe", "icon": _GRAFANA_SVG},
         ],
     },
     {"id": "network", "label": "网络管控中心", "path": "/network", "icon": _NETWORK_SVG},

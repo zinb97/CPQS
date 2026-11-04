@@ -114,7 +114,7 @@ backen/
 - ❌ 移除 Vite 构建步骤
 - ❌ 移除 mock.js（所有数据真实）
 - ❌ 移除 80% 死代码（components.js 中 11 个未用组件）
-- ❌ 移除 Grafana iframe 的 sandbox 缺失（原版 4 个 Grafana iframe 无 sandbox）
+- ❌ 移除 Grafana 总览页面（原版 `/resource/iframe` 的 Grafana iframe 已整体下线）
 - ✅ 新增 `/api/metrics/*` JSON 端点
 - ✅ 新增 SSR 初始快照（首屏无 Loading）
 - ✅ 新增 Prometheus 不可用横幅提示

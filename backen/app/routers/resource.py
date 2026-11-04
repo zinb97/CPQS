@@ -1,4 +1,4 @@
-"""资源管控中心页面路由：集群列表 / 集群详情 / 主机详情 / Grafana 总览。
+"""资源管控中心页面路由：集群列表 / 集群详情 / 主机详情。
 
 所有页面均挂载在 `/resource` 路径下，与侧边栏"资源管控中心"菜单共享激活态。
 子项导航由 `base.html` 侧边栏渲染（menu.children），无顶部 tab 栏。
@@ -61,20 +61,5 @@ async def host_detail_page(instance: str, request: Request) -> HTMLResponse:
             **base_context(request),
             "title": f"主机 {instance} - 资源管控中心",
             "instance": instance,
-        },
-    )
-
-
-@router.get("/resource/iframe", response_class=HTMLResponse)
-async def resource_iframe_page(request: Request) -> HTMLResponse:
-    """资源管控中心 - Grafana 总览（保留原 Grafana iframe）。"""
-    return request.app.state.templates.TemplateResponse(
-        request,
-        "resource_iframe.html",
-        {
-            **base_context(request),
-            "title": "Grafana 总览 - 资源管控中心",
-            "iframe_url": "http://192.168.10.31:3000/goto/cg07s2sm4a134a?orgId=default",
-            "sandbox": "allow-scripts allow-same-origin allow-forms",
         },
     )
