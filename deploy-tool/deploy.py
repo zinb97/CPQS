@@ -227,7 +227,9 @@ class Task:
 # 内置默认任务。servers.json 中定义了同名任务时，以配置为准（字段级覆盖）。
 DEFAULT_TASKS: Dict[str, Dict[str, object]] = {
     "collector": {
-        "command": "python3 metrics_exporter.py --port 9100",
+        # 所有服务器统一使用系统解释器 /usr/bin/python3，避免 PATH 上的 python3
+        # 指向 conda / pyenv 等非系统环境（远端非交互 shell 的 PATH 往往与登录 shell 不同）。
+        "command": "/usr/bin/python3 metrics_exporter.py --port 9100",
         "cwd": "collector",
         "env": {"PYTHONUNBUFFERED": "1"},
         "stop_timeout": 10,
@@ -919,6 +921,8 @@ if [ -w "$parent" ]; then printf 'PARENT_WRITABLE=1\\n'; else printf 'PARENT_WRI
 if command -v tar >/dev/null 2>&1; then printf 'TAR=1\\n'; else printf 'TAR=0\\n'; fi
 printf 'TAR_VERSION=%s\\n' "$(tar --version 2>/dev/null | head -n 1)"
 if tar --no-same-owner -cf /dev/null /dev/null >/dev/null 2>&1; then printf 'TAR_NO_SAME_OWNER=1\\n'; else printf 'TAR_NO_SAME_OWNER=0\\n'; fi
+if [ -x /usr/bin/python3 ]; then printf 'PYTHON3=1\\n'; else printf 'PYTHON3=0\\n'; fi
+printf 'PYTHON3_PATH=%s\\n' "$(command -v python3 2>/dev/null || printf '')"
 printf 'CPQS_CHECK_DONE\\n'
 """
 
@@ -1326,6 +1330,11 @@ class SshRunner:
         if data.get("TAR") == "1" and data.get("TAR_NO_SAME_OWNER") != "1":
             warnings.append(
                 "远端 tar 不支持 --no-same-owner，将使用兼容模式解包，可能出现属主警告"
+            )
+        if data.get("PYTHON3") == "0":
+            # 任务命令写死了 /usr/bin/python3，缺这个解释器时 start 会立刻失败。
+            warnings.append(
+                "远端缺少可执行的 /usr/bin/python3，后台任务（如 collector）将无法启动"
             )
 
         return CheckResult(

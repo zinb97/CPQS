@@ -254,13 +254,15 @@ py deploy-tool\deploy.py stop    --all                        # 结束任务
 ```json
 "tasks": {
   "collector": {
-    "command": "python3 metrics_exporter.py --port 9100",
+    "command": "/usr/bin/python3 metrics_exporter.py --port 9100",
     "cwd": "collector",
     "env": { "PYTHONUNBUFFERED": "1" },
     "stop_timeout": 10
   }
 }
 ```
+
+**Python 解释器一律写绝对路径 `/usr/bin/python3`**，不要用裸 `python3`：远端进程由 `nohup setsid sh -c` 在非交互 SSH 会话里拉起，PATH 可能与登录 shell 不同（conda / pyenv / 自编译 Python 会抢先命中），导致装依赖和跑脚本用的不是同一个解释器。`check` 会顺带探测 `/usr/bin/python3`，缺失时给出告警。
 
 某个服务器可以私有化任务定义（在 `servers[]` 对象里写 `tasks`），字段级覆盖全局配置；写 `"enabled": false` 即可在该服务器上关掉某个任务：
 
@@ -371,6 +373,18 @@ sudo chown -R <部署用户>:<部署用户> /opt/CPQS
 ### 远端没有 `tar`
 
 `check` 会提示“远端缺少 tar 命令”。需要安装 `tar`（绝大多数 Linux 已自带）。
+
+### 远端没有 `/usr/bin/python3`
+
+任务命令固定用 `/usr/bin/python3`。`check` 会告警“远端缺少可执行的 /usr/bin/python3”，此时 `start` 会报 `start_failed` 并回显日志尾部。安装系统 Python 3：
+
+```bash
+sudo apt install -y python3        # Debian/Ubuntu
+sudo yum install -y python3        # RHEL/CentOS
+ls -l /usr/bin/python3             # 确认存在且可执行
+```
+
+如果该机器的系统 Python 确实装在别处，只改这台服务器的 `tasks.collector.command` 即可，不必改 `deploy.py`。
 
 ### 部署到多台时卡在确认
 

@@ -9,7 +9,7 @@
   "exclude": [],
   "tasks": {
     "collector": {
-      "command": "python3 metrics_exporter.py --port 9100",
+      "command": "/usr/bin/python3 metrics_exporter.py --port 9100",
       "cwd": "collector",
       "env": {
         "PYTHONUNBUFFERED": "1"
@@ -51,20 +51,6 @@
       "group": "xfusion",
       "host": "S501.site",
       "port": 1015,
-      "user": "xfusion"
-    },
-    {
-      "name": "X6",
-      "group": "xfusion",
-      "host": "S501.site",
-      "port": 1016,
-      "user": "xfusion"
-    },
-    {
-      "name": "X7",
-      "group": "xfusion",
-      "host": "S501.site",
-      "port": 1016,
       "user": "xfusion"
     },
     {
