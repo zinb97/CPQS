@@ -8,7 +8,7 @@ import http.server
 from urllib.parse import urlparse
 
 from host_collector import HostCollector
-from gpu_collector import GpuCollector
+from gpu_collector import GpuCollector, PYNVML_AVAILABLE, PYNVML_IMPORT_ERROR
 
 
 _INDEX_HTML = '''<!DOCTYPE html>
@@ -96,8 +96,25 @@ class MetricsExporter:
         self.collectors = [HostCollector(), GpuCollector()]
         self.server = None
 
+    def _warn_gpu_unavailable(self):
+        """GPU 采集不可用时给出一次性告警。
+
+        这不是致命错误——主机侧指标照常上报——但如果不提示，运维看到
+        `DCGM_FI_DEV_*` 一条都没有时无从判断是「这台机器没 GPU」还是
+        「采集器装坏了」。
+        """
+        if PYNVML_AVAILABLE:
+            return
+        reason = f"：{PYNVML_IMPORT_ERROR}" if PYNVML_IMPORT_ERROR else ""
+        print(
+            f'[WARN] pynvml 不可用{reason}，GPU 指标（DCGM_FI_DEV_*）将全部缺失；'
+            f'主机侧 node_* 指标不受影响。'
+        )
+        print('[WARN] 如需 GPU 指标，请执行: pip install nvidia-ml-py')
+
     def start(self):
         """启动 HTTP 服务器"""
+        self._warn_gpu_unavailable()
         MetricsHandler.set_collectors(self.collectors)
         # 必须用多线程版：TCPServer 是单线程的，一个慢连接（Prometheus 抓取
         # 超时后仍在发数据）会阻塞后续所有抓取。ThreadingHTTPServer 自带

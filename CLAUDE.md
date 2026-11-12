@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 | 目录 | 作用 | 关键技术 |
 |------|------|----------|
-| `collector/` | Linux 主机 + GPU 指标采集，HTTP 暴露为 Prometheus 抓取端点 | `pynvml`（硬依赖）+ 标准库（`http.server`/`socketserver`） |
+| `collector/` | Linux 主机 + GPU 指标采集，HTTP 暴露为 Prometheus 抓取端点 | `pynvml`（**可选**依赖，缺失时仅 GPU 指标为空）+ 标准库（`http.server`/`socketserver`） |
 | `QoSController/` | **git 子模块**（上游 `https://github.com/zinb97/QoSController.git`）。RYU SDN 控制器 + Mininet 拓扑 + Web 可视化 + QoS/切片/组播 | RYU / OpenFlow 1.3 / gRPC / Mininet |
 | `backen/` | FastAPI Dashboard，从 Prometheus 拉取指标并渲染 SSR + JSON | FastAPI / uvicorn / httpx / jinja2 / pyyaml |
 | `netSim/` | Mininet 中国移动 CMNET 骨干网拓扑仿真（独立于子模块内的 `netSim.py`） | Mininet / Open vSwitch / RYU 控制器（外部） |
@@ -29,7 +29,7 @@ collector/metrics_exporter.py :9100         QoSController/QoSController.py :8080
         ┌──────────────┴───────────────┐
         ▼                              ▼
 backen/app/prometheus/client.py    backen/routers/shells.py
-(PromQL 查 node_* / qos_*)          /network → iframe 到 192.168.10.31:8080
+(PromQL 查 node_* / qos_*)          /network → iframe 到 192.168.10.31:8080（地址见 Settings）
         ▼                          （即 QoSController 的 vis-network Web UI）
 backen FastAPI :8080 (SSR + /api/metrics/*)
 ```
@@ -40,7 +40,7 @@ backen FastAPI :8080 (SSR + /api/metrics/*)
 
 - `backen/app/prometheus/queries.py` 中的 `Q_SWITCHES`/`Q_LINKS`/`Q_HOSTS`/`Q_PACKET_IN`/`Q_LATENCY_RANGE` 是 **`qos_*` 指标，由 QoSController 的 `/metrics` 提供**。改名会静默返回空值（不报错，前端只显示空状态）。
 - **端口映射下的主机标识**：所有服务器共用同一批 IP，Prometheus `instance` 标签形如 `101.34.209.104:9111`，**只有端口能区分机器**。约定：界面主标识用**主机名**（`node_uname_info{nodename=...}`，由 `_node_hostnames()` 解析），`ip:port` 只作副标识；URL、路由、PromQL 一律用完整的 `ip:port`，只传裸 IP 有歧义（后端兜底会挑在线的那台，见 `_match_instance_by_ip`）。前端改 URL 时**不要剥掉端口**，否则会跳到同 IP 的另一台机器。
-- `backen/app/routers/shells.py` 的 `/network` 指向 `http://192.168.10.31:8080/`，与 QoSController 的 `--wsapi-port 8080` 是**同一 host:port**（该端口同时是 RYU WS 端口和 Web 可视化端口）。backen 不做代理，控制器没起来这个页面就是空白 iframe。
+- `backen/app/routers/shells.py` 的 `/network` 默认指向 `http://192.168.10.31:8080/`，与 QoSController 的 `--wsapi-port 8080` 是**同一 host:port**（该端口同时是 RYU WS 端口和 Web 可视化端口）。backen 不做代理，控制器没起来这个页面就是空白 iframe。四个壳的地址**都不写死在代码里**，而是放在 `Settings`（`SHELL_NETWORK_URL` / `SHELL_TASK_URL` / `SHELL_TELEMETRY_URL` / `SHELL_COMPUTE_URL`），请求时从 `app.state.settings` 取，改环境变量即生效。默认的 `192.168.10.31` 是**内网直连**地址，其余三个走 NAT 入口 `101.34.209.104`。**实测 `101.34.209.104:8080` 没有 frp 映射（连接不通）**，控制器的 8080 目前只有内网可达；外网访问 backen 时 `/network` 的 iframe 会空白，需先加 frpc 映射再把 `SHELL_NETWORK_URL` 指过去
 - `prometheus/prometheus.yml` 里的 `scrape_configs` 决定了 `cluster` / `location` / `job` 标签的来源，**这些标签由 Prometheus 注入，collector 与控制器自己都不上报**。缺 `cluster` 标签会导致 `by(cluster)` 聚合（资源管控中心整套 `q_cluster_*` PromQL）返回空。
 - 指标名分裂是有意为之：主机/GPU 用 `node_exporter` / DCGM 标准命名，网络侧用 `qos_` 前缀自研命名。
 
@@ -48,7 +48,7 @@ backen FastAPI :8080 (SSR + /api/metrics/*)
 
 ```bash
 # collector（必须 cd 到 collector/ 内，因使用裸导入）
-cd collector && pip install -r requirements.txt   # nvidia-ml-py，硬依赖
+cd collector && pip install -r requirements.txt   # nvidia-ml-py，仅 GPU 采集需要；未装则只有 DCGM 指标缺失
 python metrics_exporter.py --port 9100
 
 # QoSController（在子模块目录内；需 Linux + RYU）
@@ -80,24 +80,25 @@ python3 deploy-tool/deploy.py deploy --target D1 --dry-run
 - `config.js` — 空文件（0 字节），无内容
 - `references/*.html` — 旧版独立 Dashboard（`大屏.html` / `集群管理平台.html`），已被 `backen/` 取代，仅作历史参考
 - `doc/` — 科研文档（研究目标、测试大纲 + `images/`），非代码，改动前先确认是否属于交付物
-- `QoSController/` — git 子模块（见上表）。**不要在这里新增文件或直接改子模块内容**，改动应在上游仓库做；`git status` 会显示 `QoSController` 为 modified 属正常。**注意本 checkout 中子模块尚未 `git submodule update --init`，目录是空的**，需要上游文件时先初始化
+- `QoSController/` — git 子模块（见上表）。**不要在这里新增文件或直接改子模块内容**，改动应在上游仓库做；`git status` 会显示 `QoSController` 为 modified 属正常。**本 checkout 中子模块已初始化**（`git submodule status` 有输出，目录内含 `QoSController.py` / `ofctl_rest.py` / `controllers/` 等文件），需要上游文件时可直接读；若显示 `-`（未初始化）才需 `git submodule update --init`
 - `.claude/` — Claude Code 配置（`settings.json` 强制全程简体中文回复），已 `.gitignore`
 - `.idea/` — PyCharm 项目配置（已 `.gitignore`）
 
 ## collector/ 架构要点
 
 - `host_collector.py` — `HostCollector` 类。`_read_*` 方法各自读取一个 procfs/sysfs 数据源；`_collect_all()` 一次性调用它们，结果存 `self._data`。输出两种格式：`to_json()` / `to_prometheus()`。
-- `gpu_collector.py` — `GpuCollector` 类，通过 `pynvml` 调用 NVML，覆盖 `DCGM_FI_DEV_*` 指标。`to_prometheus(**_kwargs)` 忽略多余 kwargs，便于上层统一调用。**pynvml 为硬依赖**，无降级路径。
+- `gpu_collector.py` — `GpuCollector` 类，通过 `pynvml` 调用 NVML，覆盖 `DCGM_FI_DEV_*` 指标。`to_prometheus(**_kwargs)` 忽略多余 kwargs，便于上层统一调用。**pynvml 是可选依赖**：`import pynvml` 包在 try/except 里，失败时 `PYNVML_AVAILABLE=False`、`GpuCollector.available=False`，`to_prometheus()` 返回空串——主机侧 `node_*` 指标照常上报。exporter 启动时打一条 `[WARN]` 提示缺 GPU 指标（避免「这台机没 GPU」与「采集器装坏了」混淆）。
 - `metrics_exporter.py` — `MetricsHandler` (`BaseHTTPRequestHandler`) 持有 `collectors` 列表，每次抓取对每个采集器调用 `to_prometheus()` 并拼接。`MetricsExporter` 默认挂载 `HostCollector + GpuCollector`。用 `ThreadingHTTPServer`（非 `HTTPServer`）：单线程版会被一个慢连接阻塞所有抓取。
 
 **Prometheus 输出约定**（影响 PromQL 编写）：
 - `node_cpu_seconds_total{mode=...}` 在 `_read_cpu_stat` 中已 `/100`，直接是秒
 - 磁盘 `sectors_read`/`sectors_written` 在 `to_prometheus()` 中 `×512` 转字节
 - 磁盘 `io_time_ms` `/1000` 转秒
+- 磁盘**只上报最上层块设备**（`_disk_skip_devices()`）：分区、RAID 成员盘、LVM/device-mapper 中间层全部过滤，否则同一份 IO 会被按层重复累加，`node_disk_*_bytes_total` 成倍虚高。判定靠 sysfs 的 `holders`/`slaves`/`partition` 层次关系，不猜设备名；`/sys` 不可见时不过滤（宁可少过滤也不丢指标）
 - 计数器无 `# HELP`/`# TYPE` 头（Prometheus 自动推断）
 - `node_uname_info` / `node_os_info` / `node_dmi_info` 的标签值**已做引号/反斜杠转义**（`_escape_label_value()`）
 
-数据源列表（/etc/os-release, /sys/class/dmi/id/*, /proc/stat, /proc/loadavg, /proc/meminfo, /proc/net/{snmp,dev,sockstat,netstat}, /proc/diskstats, /proc/mounts, /sys/class/thermal/thermal_zone*）和过滤规则（跳过 `loop*`, `lo`, `br*`, `docker*`, `veth*`, `b.*`）详见 `host_collector.py` 的 `_collect_all()` 与各 `_read_*` 方法。
+数据源列表（/etc/os-release, /sys/class/dmi/id/*, /proc/stat, /proc/loadavg, /proc/meminfo, /proc/net/{snmp,dev,sockstat,netstat}, /proc/diskstats, /proc/mounts, /sys/class/thermal/thermal_zone*）和过滤规则（跳过 `loop*`, `lo`, `br*`, `docker*`, `veth*`, `b.*`，磁盘按 top-level 规则过滤）详见 `host_collector.py` 的 `_collect_all()` 与各 `_read_*` 方法。
 
 ## backen/ 架构要点
 
@@ -174,3 +175,9 @@ python3 deploy-tool/deploy.py status --all   # 只读：查远端后台任务状
 | `CLUSTER_META_PATH` | `config/cluster_locations.yaml` | 集群经纬度元数据（相对 `backen/`） |
 | `REQUEST_TIMEOUT_S` | `3.0` | 单次 Prometheus 查询超时 |
 | `NETWORK_RATED_MBPS` | `1000.0` | 网络额定带宽，QoS 雷达「带宽余量」维度的基准 |
+| `SHELL_NETWORK_URL` | `http://192.168.10.31:8080/` | `/network` 壳的 iframe 地址（QoSController Web UI，**内网直连地址**） |
+| `SHELL_TASK_URL` | `http://101.34.209.104:32000/cluster-manage` | `/task` 壳的 iframe 地址 |
+| `SHELL_TELEMETRY_URL` | `http://101.34.209.104:39280/pages/vis.html` | `/telemetry` 壳的 iframe 地址 |
+| `SHELL_COMPUTE_URL` | `http://101.34.209.104:8765` | `/compute` 壳的 iframe 地址 |
+
+backen 不做反向代理，**浏览器必须能直连上述地址**，否则 iframe 空白（页面本身仍正常渲染）。`101.34.209.104` 是 NAT 后的统一入口，`192.168.10.31` 只在 lab 内网可达。

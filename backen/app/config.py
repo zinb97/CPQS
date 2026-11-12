@@ -28,6 +28,18 @@ class Settings:
     cards_cache_s: int = 4
     charts_cache_s: int = 28
 
+    # ===== iframe 壳的外部子系统地址 =====
+    # backen 不做反向代理，浏览器必须能直连这些地址才能渲染 iframe。
+    # 默认值对应当前部署环境：
+    #   - 101.34.209.104 是 NAT 后的统一入口（与 prometheus.yml 里的
+    #     node-* target 同一批地址，端口是映射后的对外端口）
+    #   - 192.168.10.31 是实验室内部直连地址，只有内网可达
+    # 换环境（内外网、端口映射变更）时用对应的环境变量覆盖，不要改代码。
+    shell_network_url: str = "http://192.168.10.31:8080/"
+    shell_task_url: str = "http://101.34.209.104:32000/cluster-manage"
+    shell_telemetry_url: str = "http://101.34.209.104:39280/pages/vis.html"
+    shell_compute_url: str = "http://101.34.209.104:8765"
+
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
@@ -37,4 +49,10 @@ class Settings:
             network_rated_mbps=float(
                 os.getenv("NETWORK_RATED_MBPS", cls.network_rated_mbps)
             ),
+            shell_network_url=os.getenv("SHELL_NETWORK_URL", cls.shell_network_url),
+            shell_task_url=os.getenv("SHELL_TASK_URL", cls.shell_task_url),
+            shell_telemetry_url=os.getenv(
+                "SHELL_TELEMETRY_URL", cls.shell_telemetry_url
+            ),
+            shell_compute_url=os.getenv("SHELL_COMPUTE_URL", cls.shell_compute_url),
         )

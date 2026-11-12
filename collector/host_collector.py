@@ -355,13 +355,19 @@ class HostCollector:
         return meminfo
 
     def _read_diskstats(self) -> list:
-        """读取 /proc/diskstats """
+        """读取 /proc/diskstats
+
+        只保留最上层的块设备（整盘 / md / dm），过滤掉分区、RAID 成员盘与
+        设备映射中间层——这几层统计的是同一份流量，全量求和会让
+        node_disk_read_bytes_total 成倍虚高。判定规则见 `_disk_skip_devices()`。
+        """
+        devs = os.listdir("/sys/block")
         disks = []
         for line in self._read_lines('/proc/diskstats'):
             fields = line.split()
             if len(fields) >= 14:
                 device = fields[2]
-                if device.startswith('loop') or device.startswith('ram'):
+                if device.startswith(('loop', 'ram', 'zram', 'sr')) or device not in devs:
                     continue
                 item = {
                     'major': int(fields[0]),
@@ -661,9 +667,9 @@ if __name__ == '__main__':
     pass
     collector = HostCollector()
     collector.collect()
-    print(collector._data.get('cpu_stat'))
+    # print(collector._data.get('diskstats'))
     # print(collector._read_netstat())
-    # print(json.dumps(collector._read_sockstat(), indent=4, ensure_ascii=False))
+    print(json.dumps(collector._data.get('diskstats'), indent=4, ensure_ascii=False))
 
     # s = collector.to_json()
     # print(collector.to_prometheus())

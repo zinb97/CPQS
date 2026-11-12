@@ -4,12 +4,27 @@ GPU Collector (NVIDIA)
 通过 pynvml 调用 NVML 采集 GPU 指标，输出格式兼容 DCGM exporter。
 1.txt 中的 18 个 DCGM_FI_DEV_* 指标全部覆盖。
 若主机无 NVIDIA 驱动/设备，指标列表为空。
+
+pynvml（nvidia-ml-py）是**可选**依赖：未安装时本采集器降级为空输出，
+主机侧的 CPU/内存/磁盘等指标照常上报。早前这里是硬 import，
+目标机没装 nvidia-ml-py 会让整个 exporter 启动失败 —— 该主机不是「缺 GPU
+指标」，而是在 Prometheus 里彻底消失，连 node_* 也一起没了。
 """
 
 import os
 import time
 import socket
-import pynvml
+
+try:
+    import pynvml
+    PYNVML_IMPORT_ERROR = None
+except Exception as _exc:  # ImportError，也兼容 pynvml 内部 import 失败
+    pynvml = None
+    PYNVML_IMPORT_ERROR = _exc
+
+# 是否具备 GPU 采集能力。False 表示 pynvml 不可用或 NVML 初始化失败，
+# 两种情况都不影响主机指标的采集。
+PYNVML_AVAILABLE = pynvml is not None
 
 
 # ---------------------------------------------------------------------------
@@ -250,10 +265,16 @@ def _format_pci_bus_id(handle):
 # ---------------------------------------------------------------------------
 
 class GpuCollector:
-    """NVIDIA GPU 指标采集器。"""
+    """NVIDIA GPU 指标采集器。
+
+    `available` 表示本机是否真的能采到 GPU 数据：pynvml 未安装、或 NVML
+    初始化失败（无驱动/无权限/无设备）时为 False，此时 `to_prometheus()`
+    返回空字符串，宿主机的 node_* 指标不受任何影响。
+    """
 
     def __init__(self):
         self._data = {'gpus': [], 'driver_version': ''}
+        self.available = PYNVML_AVAILABLE
 
     def collect(self) -> dict:
         self._collect_all()
@@ -261,6 +282,9 @@ class GpuCollector:
 
     def _collect_all(self):
         self._data = {'gpus': [], 'driver_version': ''}
+        self.available = False
+        if pynvml is None:
+            return
         try:
             pynvml.nvmlInit()
         except Exception:
@@ -271,6 +295,7 @@ class GpuCollector:
             self._data['gpus'] = [
                 g for g in (_read_gpu(i) for i in range(count)) if g is not None
             ]
+            self.available = True
         finally:
             try:
                 pynvml.nvmlShutdown()
