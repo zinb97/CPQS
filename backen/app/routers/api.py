@@ -24,7 +24,9 @@ from app.prometheus.queries import (
     Q_HOSTS,
     Q_LINKS,
     Q_LINKS_BANDWIDTH,
+    Q_LINKS_CAPACITY,
     Q_LINKS_LOSS,
+    Q_LINKS_LOSS_CONFIGURED,
     Q_LINKS_QUALITY,
     Q_MEMORY_TOTAL,
     Q_PACKET_IN,
@@ -441,15 +443,18 @@ async def map_data(request: Request) -> JSONResponse:
 
 @router.get("/links")
 async def links_quality(request: Request) -> JSONResponse:
-    """链路质量列表（延迟 / 丢包率）。
+    """链路质量列表（时延 / 丢包率 / 额定速率）。
 
-    数据源为 QoSController 暴露的 `qos_link_delay_ms` 与 `qos_link_loss_percent`，
-    两者是独立 series，按 (src_dpid, dst_dpid) 合并为一条链路记录。
-    双向链路会各自上报一条，此处保持原样不去重。
+    数据源为 QoSController 暴露的 `qos_link_delay_ms`、`qos_link_loss_percent`
+    与 `qos_link_capacity_bits`，是独立 series，按 (src_dpid, dst_dpid)
+    合并为一条链路记录。双向链路会各自上报一条，此处保持原样不去重。
+
+    注意：latency 是 netem 的**配置**时延，loss 是**实测**丢包率。
     """
-    delay_results, loss_results = await asyncio.gather(
+    delay_results, loss_results, cap_results = await asyncio.gather(
         _safe_query(request, Q_LINKS_QUALITY),
         _safe_query(request, Q_LINKS_LOSS),
+        _safe_query(request, Q_LINKS_CAPACITY),
     )
 
     links: dict[tuple[str, str], dict[str, Any]] = {}
@@ -466,11 +471,18 @@ async def links_quality(request: Request) -> JSONResponse:
                 continue
             links.setdefault(
                 (src, dst),
-                {"source": src, "target": dst, "latency": None, "loss": None},
+                {
+                    "source": src,
+                    "target": dst,
+                    "latency": None,
+                    "loss": None,
+                    "capacity_bps": None,
+                },
             )[field] = value
 
     _collect(delay_results, "latency")
     _collect(loss_results, "loss")
+    _collect(cap_results, "capacity_bps")
 
     return cache_response(
         {"items": list(links.values())},
@@ -522,14 +534,23 @@ async def qos_score(request: Request) -> JSONResponse:
 
     「抗扰动」维度没有直接对应的攻击检测指标，用主机侧 TCP 异常计数器作代理
     ——指标真实存在且持续上报，口径写在 detail 里交代清楚。
+
+    指标的实测/配置之分（务必看清，否则会把配置值当实测）：
+    - 时延 `qos_link_delay_ms`：**配置值**（netem 参数）。被动采集拿不到 RTT，
+      实测时延需要主动探测，尚未实现。
+    - 丢包率 `qos_link_loss_percent`：**实测**（控制器用 tc -s 计数差分算出）。
+      同一指标的 `qos_link_loss_configured_percent` 是 netem 配置值，仅作对照。
+    - 带宽占用 `qos_link_bandwidth_usage_bits`：**实测**（OpenFlow 端口统计差分，
+      单向 src→dst 口径）。额定值取 OVS 的 `qos_link_capacity_bits`。
     """
     (
-        delay_rows, loss_rows, bw_rows, sw_rows, rule_rows,
-        fail_rows, open_rows, listen_rows, route_rows, syn_rows,
+        delay_rows, loss_rows, bw_rows, cap_rows, sw_rows, rule_rows,
+        fail_rows, open_rows, listen_rows, route_rows, syn_rows, loss_cfg_rows,
     ) = await asyncio.gather(
         _safe_query(request, Q_LINKS_QUALITY),
         _safe_query(request, Q_LINKS_LOSS),
         _safe_query(request, Q_LINKS_BANDWIDTH),
+        _safe_query(request, Q_LINKS_CAPACITY),
         _safe_query(request, Q_SWITCHES),
         _safe_query(request, Q_RULES_ACTIVE),
         _safe_query(request, Q_SEC_CONN_FAILS),
@@ -537,6 +558,7 @@ async def qos_score(request: Request) -> JSONResponse:
         _safe_query(request, Q_SEC_LISTEN_DROPS),
         _safe_query(request, Q_SEC_NO_ROUTES),
         _safe_query(request, Q_SEC_SYN_RETRANS),
+        _safe_query(request, Q_LINKS_LOSS_CONFIGURED),
     )
 
     delays = [v for v in (_scalar([r]) for r in delay_rows) if v is not None]
@@ -552,11 +574,19 @@ async def qos_score(request: Request) -> JSONResponse:
         else None
     )
     avg_loss = sum(losses) / len(losses) if losses else None
+    # qos_link_loss_configured_percent 是 netem 的配置丢包率，与实测值对照
+    # 可以看出「配置的损伤有没有真的生效」
+    loss_cfgs = [v for v in (_scalar([r]) for r in loss_cfg_rows) if v is not None]
+    avg_loss_configured = sum(loss_cfgs) / len(loss_cfgs) if loss_cfgs else None
     # qos_link_bandwidth_usage_bits 是 bit/s，评分按 Mbps 口径（换算 ÷1e6）
     bandwidth_mbps = None if (bw := _scalar(bw_rows)) is None else bw / 1e6
+    # 额定速率：优先用 OVS link_speed 实测的链路额定值（sum 与占用同口径）；
+    # 拿不到时退回 Settings.network_rated_mbps 的全局假设
+    capacity_mbps = None if (cap := _scalar(cap_rows)) is None else cap / 1e6
+    rated_mbps = capacity_mbps or request.app.state.settings.network_rated_mbps
+    rated_from_capacity = bool(capacity_mbps)
     switch_total = _scalar(sw_rows)
     rules_active = _scalar(rule_rows)
-    rated_mbps = request.app.state.settings.network_rated_mbps
 
     # 抗扰动信号（每秒发生率，跨全部采集节点求和）
     conn_fails = _scalar(fail_rows)
@@ -598,21 +628,28 @@ async def qos_score(request: Request) -> JSONResponse:
          "detail": f"时延标准差 {delay_std:.1f} ms" if delay_std is not None else "无数据"},
         {"key": "loss", "label": "丢包率",
          "score": _lin(avg_loss, 5.0), "measured": avg_loss is not None,
-         "detail": f"均值 {avg_loss:.2f} %" if avg_loss is not None else "无数据"},
+         "detail": (
+             f"实测均值 {avg_loss:.2f} %"
+             + (f"（netem 配置 {avg_loss_configured:.2f} %）"
+                if avg_loss_configured is not None else "")
+         ) if avg_loss is not None else "无数据"},
         # 控制器活着 = 链路可用。target 数拿不到（ofctl_rest 未加载），
         # 故只按交换机数量是否上报来判断，不编造具体百分比。
         {"key": "availability", "label": "可用性",
          "score": 100.0 if switch_total else 0.0, "measured": switch_total is not None,
          "detail": f"交换机 {int(switch_total)} 台在线" if switch_total else "无数据"},
-        # 带宽余量 = 1 - 占用/额定。额定值取 Settings.network_rated_mbps
-        # （默认 1000 Mbps，环境变量 NETWORK_RATED_MBPS 可覆盖）——
-        # 控制器只上报占用、不含链路速率，没有这个基准就算不出余量。
+        # 带宽余量 = 1 - 占用/额定。
+        # 额定值优先用 OVS Interface link_speed 上报的链路额定速率
+        # （qos_link_capacity_bits，与占用同为「全部有向边之和」，口径一致）；
+        # 拿不到时才退回 Settings.network_rated_mbps 的全局假设
+        # （环境变量 NETWORK_RATED_MBPS 可覆盖）。
         # 占用超过额定时线性扣到 0，不出现负分。
         {"key": "bandwidth", "label": "带宽余量",
          "score": None if bandwidth_mbps is None else
              round(max(0.0, min(100.0, 100.0 * (1 - bandwidth_mbps / rated_mbps))), 1),
          "measured": bandwidth_mbps is not None,
-         "detail": f"占用 {bandwidth_mbps:.2f} / 额定 {rated_mbps:.0f} Mbps"
+         "detail": (f"占用 {bandwidth_mbps:.2f} / 额定 {rated_mbps:.0f} Mbps"
+                    f"（{'OVS link_speed' if rated_from_capacity else '全局假设'}）")
                    if bandwidth_mbps is not None else "无数据"},
         # 抗扰动：用主机侧 TCP 异常事件代理，没有真正的攻击检测指标。
         # 旁证信号缺失时按剩余权重归一；核心信号（失败率）缺失则整个维度不给分。

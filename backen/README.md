@@ -50,7 +50,7 @@ python -m app.main
 | `GET /api/metrics/overview` | 4s | 9 个 Dashboard 指标卡聚合（1 次 targets + 6 条 PromQL 并发） |
 | `GET /api/metrics/bandwidth` | 28s | 24h 带宽趋势（5m 步进，单位 Mbps） |
 | `GET /api/metrics/map` | 28s | 集群散点数据（经纬度元数据 + 在线/总节点数 + 健康态） |
-| `GET /api/metrics/links` | 28s | 链路时延与丢包（`qos_link_delay_ms` + `qos_link_loss_percent`，按 `src_dpid`/`dst_dpid` 合并） |
+| `GET /api/metrics/links` | 28s | 链路时延、丢包与额定速率（`qos_link_delay_ms` + `qos_link_loss_percent` + `qos_link_capacity_bits`，按 `src_dpid`/`dst_dpid` 合并；时延是 netem 配置值，丢包是实测值） |
 | `GET /api/metrics/events` | 4s | ALERTS 兜底（Prometheus 非事件型），含 `lastUpdatedAt` 与 firing/resolved 状态 |
 | `GET /api/metrics/clusters` | 4s | 集群列表（资源管控中心，含每集群 9 条 PromQL） |
 | `GET /api/metrics/clusters/{cluster_id}` | 4s | 集群详情（含每节点 10 条 PromQL） |

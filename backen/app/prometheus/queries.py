@@ -33,11 +33,20 @@ Q_BANDWIDTH_TX_RANGE = "sum(rate(node_network_transmit_bytes_total[5m])) * 8 / 1
 # ===== 网络链路质量 =====
 # 由 QoSController 的 /metrics 暴露，链路双向各上报一条 series。
 # 注意标签名是 src_dpid/dst_dpid，不是 source/target。
+#
+# qos_link_delay_ms 是 netem 的**配置时延**（被动采集拿不到 RTT，
+# 实测时延需要主动探测，尚未实现）——消费时别当成实测值。
 Q_LINKS_QUALITY = "qos_link_delay_ms"
+# qos_link_loss_percent 是**实测**丢包率（控制器用 tc -s 累计计数差分算出）。
 Q_LINKS_LOSS = "qos_link_loss_percent"
-# 带宽占用（bit/s）。当前恒为 0（网络暂无流量），有流量时它就是 QoS 雷达
-# 「带宽余量」的分子，额定值来自 Settings.network_rated_mbps。
+# netem 的**配置**丢包率，与实测值对照可验证损伤是否真的生效。
+Q_LINKS_LOSS_CONFIGURED = "qos_link_loss_configured_percent"
+# 带宽占用（bit/s）：单向 src→dst 的实测吞吐，对全部有向边求和即
+# 「每条物理链路的双向总流量」。
 Q_LINKS_BANDWIDTH = "sum(qos_link_bandwidth_usage_bits)"
+# 链路额定速率（bit/s）：来自 OVS Interface 的 link_speed，同样对有向边求和。
+# 与上一条口径一致（都是「全部有向边之和」），两者相除即网络平均利用率。
+Q_LINKS_CAPACITY = "sum(qos_link_capacity_bits)"
 
 
 # ===== 告警事件 =====

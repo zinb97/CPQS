@@ -15,9 +15,10 @@ class Settings:
     # HTTP 客户端
     request_timeout_s: float = 3.0
 
-    # 网络额定带宽（Mbps）。QoS 雷达的「带宽余量」维度需要它做基准：
-    # 控制器只上报当前占用 qos_link_bandwidth_usage_bits，不含链路额定速率，
-    # 没有基准就算不出余量。1000 Mbps 对应千兆口，是当前网络的合理假设。
+    # 网络额定带宽（Mbps）。**仅作兜底**：QoS 雷达的「带宽余量」维度优先用
+    # 控制器上报的 qos_link_capacity_bits（来自 OVS Interface 的 link_speed，
+    # 即链路的真实协商速率）；拿不到时才退回这里的全局假设值。
+    # 1000 Mbps 对应千兆口，是当前网络在没有 OVS 速率时的合理假设。
     network_rated_mbps: float = 1000.0
 
     # 前端轮询周期（仅记录用，实际由前端 JS 控制）
