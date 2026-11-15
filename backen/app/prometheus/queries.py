@@ -34,9 +34,12 @@ Q_BANDWIDTH_TX_RANGE = "sum(rate(node_network_transmit_bytes_total[5m])) * 8 / 1
 # 由 QoSController 的 /metrics 暴露，链路双向各上报一条 series。
 # 注意标签名是 src_dpid/dst_dpid，不是 source/target。
 #
-# qos_link_delay_ms 是 netem 的**配置时延**（被动采集拿不到 RTT，
-# 实测时延需要主动探测，尚未实现）——消费时别当成实测值。
+# qos_link_delay_ms 是 netem 的**配置时延**（被动采集拿不到 RTT）——消费时别当成实测值。
 Q_LINKS_QUALITY = "qos_link_delay_ms"
+# qos_link_delay_measured_ms 是**实测时延**：控制器主动发 ICMP 探针测 RTT
+# （见 QoSController/linkprobe.py），用「同目标、异注入点」的 RTT 差分剥离出
+# 链路自身时延。有实测样本时应优先用它。
+Q_LINKS_DELAY_MEASURED = "qos_link_delay_measured_ms"
 # qos_link_loss_percent 是**实测**丢包率（控制器用 tc -s 累计计数差分算出）。
 Q_LINKS_LOSS = "qos_link_loss_percent"
 # netem 的**配置**丢包率，与实测值对照可验证损伤是否真的生效。
