@@ -22,7 +22,7 @@ from host_collector import HostCollector
 
 
 _INDEX_HTML = '''<!DOCTYPE html>
-<html><head><title>Linux Metrics Exporter</title></head>
+<html><head><meta charset="utf-8"><title>Linux Metrics Exporter</title></head>
 <body><h1>Linux Metrics Exporter</h1>
 <p><a href="/metrics">/metrics</a> - Prometheus 格式指标</p>
 <p><a href="/health">/health</a> - 健康检查</p>
@@ -71,10 +71,13 @@ class MetricsHandler(http.server.BaseHTTPRequestHandler):
         self._write(200, 'text/plain; version=0.0.4; charset=utf-8', body)
 
     def _respond_health(self) -> None:
-        self._write(200, 'text/plain', 'OK')
+        self._write(200, 'text/plain; charset=utf-8', 'OK')
 
     def _respond_index(self) -> None:
-        self._write(200, 'text/html', _INDEX_HTML)
+        # Content-Type 必须带 charset=utf-8：否则浏览器按本地编码（如 GBK）
+        # 解读 UTF-8 字节，页面里的中文全成乱码。页面里的 <meta charset>
+        # 只是兜底（文件被另存后本地打开时也靠它）。
+        self._write(200, 'text/html; charset=utf-8', _INDEX_HTML)
 
     def _respond_not_found(self) -> None:
         self._write(404, 'text/plain', 'Not Found\n')
