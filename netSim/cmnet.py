@@ -26,6 +26,7 @@ Mininet Topology Generator - 中国移动 CMNET 骨干网拓扑
     pure-python 阶段（仅构造 Topo）不需要。
 """
 import argparse
+import ipaddress
 from enum import Enum
 from functools import partial
 
@@ -313,6 +314,49 @@ class CMNetTopo(Topo):
 
 
 # ==============================================================================
+# 跨网段路由（默认路由表）
+# ==============================================================================
+def _host_network(host):
+    """取主机第一块接口的 (接口名, IP 字符串, 网段对象)。
+
+    Mininet 的 Intf.setIP 会把 '10.1.10.1/24' 拆成 ip='10.1.10.1' +
+    prefixLen='24'（字符串），这里统一转成 int。
+    """
+    intf = host.intfs[0]
+    ip = intf.ip or host.IP()
+    prefix = int(intf.prefixLen or 24)
+    net = ipaddress.ip_network(f'{ip}/{prefix}', strict=False)
+    return intf.name, ip, net
+
+
+def setup_host_routes(net, verbose=True):
+    hosts = []
+    for h in net.hosts:
+        intf_name, ip, netw = _host_network(h)
+        hosts.append((h, intf_name, ip, netw))
+
+    # 全部网段（去重）：每台主机都要为除自己网段外的每个网段配路由
+    subnets = sorted({n for _, _, _, n in hosts},
+                      key=lambda n: (int(n.network_address), n.prefixlen))
+
+    ok = fail = 0
+    for h, intf_name, ip, own_net in hosts:
+        cmds = [f'ip route replace {s} dev {intf_name}'
+                for s in subnets if s != own_net]
+        cmds.append(f'ip route replace default dev {intf_name}')
+        for cmd in cmds:
+            out = h.cmd(cmd)
+            if out.strip():
+                fail += 1
+                if verbose:
+                    info(f'  [warn] {h.name}({ip}) 路由下发失败: {cmd} -> {out.strip()}\n')
+            else:
+                ok += 1
+
+    return ok, fail
+
+
+# ==============================================================================
 # 拓扑注册 & 启动入口
 # ==============================================================================
 topos = {
@@ -324,7 +368,8 @@ topos = {
 }
 
 
-def run_cmnet(scale='medium', prov_depth=2, prov_width=2, controller_ip='127.0.0.1'):
+def run_cmnet(scale='medium', prov_depth=2, prov_width=2, controller_ip='127.0.0.1',
+              setup_routes=True):
     """启动 CMNET 拓扑"""
     topo = CMNetTopo(scale=scale, prov_depth=prov_depth, prov_width=prov_width)
     switch = partial(OVSSwitch, protocols='OpenFlow13')
@@ -342,6 +387,12 @@ def run_cmnet(scale='medium', prov_depth=2, prov_width=2, controller_ip='127.0.0
         f'省网 {len(topo.province)} | '
         f'城域 {len(topo.metro)}\n'
     )
+    if setup_routes:
+        # 跨网段主机分属不同 /24，Mininet 不自动配路由 → 必须手工补默认路由表
+        try:
+            setup_host_routes(net)
+        except Exception as e:   # 路由配置失败不应阻断拓扑启动
+            info(f'  [warn] 主机路由表配置异常：{e}\n')
     CLI(net)
     net.stop()
 
@@ -367,10 +418,15 @@ if __name__ == '__main__':
         '--controller-ip', default='127.0.0.1',
         help='RYU/ONOS 控制器 IP',
     )
+    parser.add_argument(
+        '--no-host-routes', action='store_true',
+        help='不自动为主机配置跨网段路由（默认会配置各网段直连路由 + 默认路由）',
+    )
     args = parser.parse_args()
     run_cmnet(
         scale=args.scale,
         prov_depth=args.prov_depth,
         prov_width=args.prov_width,
         controller_ip=args.controller_ip,
+        setup_routes=not args.no_host_routes,
     )
