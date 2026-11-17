@@ -47,10 +47,9 @@ backen FastAPI :8080 (SSR + /api/metrics/*)
   | `qos_link_capacity_bits` | **实测** | OVS Interface 表的 `link_speed`（网卡驱动上报的协商速率）；Mininet 的 veth 报 10 Gbps。读不到时为 0，backen 退回 `Settings.network_rated_mbps` 兜底 |
   | `qos_link_loss_percent` | **实测** | `tc -s qdisc show` 的累计计数差分：`Δdropped / (Δsent + Δdropped)`——内核 qdisc 丢包只累加 drops、**不计入 Sent**，所以分母要加上 dropped |
   | `qos_link_loss_configured_percent` | **配置** | netem 的 loss 参数，仅作对照（可验证损伤是否真的生效） |
-  | `qos_link_delay_ms` | **配置** | netem 的 delay 参数 |
-  | `qos_link_delay_measured_ms` | **实测** | 控制器**主动发 ICMP 探针**测 RTT（`QoSController/linkprobe.py`），差分法剥离出链路自身时延 |
+  | `qos_link_delay_ms` | **配置** | netem 的 delay 参数。被动采集拿不到 RTT，**实测时延需要主动探测，尚未实现** |
 
-  推论：只有配置值的那几个指标恒定不变，**拿它们评分等于给对应维度永久满分**——务必区分，别当实测结果读。
+  推论：`qos_link_delay_ms` 恒定不变时，QoS 雷达的「时延」「抖动」两个维度**永远是满分**——它们现在评的是配置值，不是实测值。别当实测结果读。
 - **端口映射下的主机标识**：所有服务器共用同一批 IP，Prometheus `instance` 标签形如 `101.34.209.104:9111`，**只有端口能区分机器**。约定：界面主标识用**主机名**（`node_uname_info{nodename=...}`，由 `_node_hostnames()` 解析），`ip:port` 只作副标识；URL、路由、PromQL 一律用完整的 `ip:port`，只传裸 IP 有歧义（后端兜底会挑在线的那台，见 `_match_instance_by_ip`）。前端改 URL 时**不要剥掉端口**，否则会跳到同 IP 的另一台机器。
 - `backen/app/routers/shells.py` 的 `/network` 默认指向 `http://192.168.10.31:8080/`，与 QoSController 的 `--wsapi-port 8080` 是**同一 host:port**（该端口同时是 RYU WS 端口和 Web 可视化端口）。backen 不做代理，控制器没起来这个页面就是空白 iframe。四个壳的地址**都不写死在代码里**，而是放在 `Settings`（`SHELL_NETWORK_URL` / `SHELL_TASK_URL` / `SHELL_TELEMETRY_URL` / `SHELL_COMPUTE_URL`），请求时从 `app.state.settings` 取，改环境变量即生效。默认的 `192.168.10.31` 是**内网直连**地址，其余三个走 NAT 入口 `101.34.209.104`。**实测 `101.34.209.104:8080` 没有 frp 映射（连接不通）**，控制器的 8080 目前只有内网可达；外网访问 backen 时 `/network` 的 iframe 会空白，需先加 frpc 映射再把 `SHELL_NETWORK_URL` 指过去
 - `prometheus/prometheus.yml` 里的 `scrape_configs` 决定了 `cluster` / `location` / `job` 标签的来源，**这些标签由 Prometheus 注入，collector 与控制器自己都不上报**。缺 `cluster` 标签会导致 `by(cluster)` 聚合（资源管控中心整套 `q_cluster_*` PromQL）返回空。
@@ -120,7 +119,7 @@ python3 deploy-tool/deploy.py deploy --target D1 --dry-run
   - `routers/resource.py` — 资源管控中心**原生页面**（`/resource` 重定向到 `/resource/clusters`，另有 cluster/host 详情页）
   - `routers/shells.py` — **4 个** iframe 壳：`/network`、`/task`、`/telemetry`、`/compute`（`/resource` 已不在此列）
   - `routers/api.py` — **10 个** JSON 端点（prefix `/api/metrics`）：`overview`、`bandwidth`、`map`、`links`、**`qos`**、`events`、以及资源管控用的 `clusters`、`clusters/{cluster_id}`、`hosts/{instance:path}/timeseries`、`hosts/{instance:path}`
-- `GET /api/metrics/qos` 返回**网络 QoS 六维评分**（时延/抖动/丢包/可用性/带宽余量/抗扰动），每个维度带 `measured` 标志区分实测值与占位值。抖动无对应指标，用链路时延标准差代理。**时延/抖动优先用实测值 `qos_link_delay_measured_ms`**（控制器主动 ICMP 探测），没有实测样本时才退回 netem 配置值并把 `measured` 置 False——配置值恒定不变，评它等于给满分；带宽余量的额定值取 `qos_link_capacity_bits`（OVS link_speed 实测），拿不到才退回 `Settings.network_rated_mbps`；丢包率是控制器差分算出的**实测值**，`detail` 里同时给出 netem 的配置值作对照
+- `GET /api/metrics/qos` 返回**网络 QoS 六维评分**（时延/抖动/丢包/可用性/带宽余量/抗扰动），每个维度带 `measured` 标志区分实测值与占位值。抖动无对应指标，用链路时延标准差代理（**注意时延本身是 netem 的配置值**，见上表）；带宽余量的额定值优先取 `qos_link_capacity_bits`（OVS link_speed 实测），拿不到才退回 `Settings.network_rated_mbps`；丢包率是控制器差分算出的**实测值**，`detail` 里同时给出 netem 的配置值作对照
 - **抗扰动维度（`key=robustness`）是「代理指标」**，不是真正的攻击检测：用 collector 上报的 TCP 异常计数器速率算分——`node_snmp_Tcp_AttemptFails`（连接失败）/ `node_snmp_Tcp_{Active,Passive}Opens`（新建连接）得失败率，`node_netstat_TcpExt_ListenDrops`（监听队列溢出=洪泛直证），`node_netstat_IpExt_InNoRoutes`（无路由报文）。三项按 0.6/0.25/0.15 加权，失败率缺失则整个维度不给分。`node_netstat_TcpExt_TCPSynRetrans` 只在 detail 里作旁证、不计分（它是链路丢包表征，已由「丢包率」维度覆盖）。原「安全性」维度无直接指标，已于 2026-10 改名为「抗扰动」以免被误读为安全态势
 - PromQL 集中在 `app/prometheus/queries.py`：Dashboard 卡片常量（`Q_*`）+ 资源管控的模板函数（`q_cluster_*` / `q_node_*`，按 `cluster` 或 `instance` 参数化）+ GPU 段（`DCGM_FI_DEV_*`，含 FLOPs 推算 `q_*_flops_peak`）+ `load_cluster_locations()` 加载 `config/cluster_locations.yaml`
 - `PrometheusClient` (`app/prometheus/client.py`) 异步封装 `/api/v1/{query,query_range,targets,labels}`；**所有异常路径返回安全空值**（让调用端走空状态展示而非抛错）

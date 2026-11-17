@@ -25,7 +25,6 @@ from app.prometheus.queries import (
     Q_LINKS,
     Q_LINKS_BANDWIDTH,
     Q_LINKS_CAPACITY,
-    Q_LINKS_DELAY_MEASURED,
     Q_LINKS_LOSS,
     Q_LINKS_LOSS_CONFIGURED,
     Q_LINKS_QUALITY,
@@ -452,9 +451,8 @@ async def links_quality(request: Request) -> JSONResponse:
 
     注意：latency 是 netem 的**配置**时延，loss 是**实测**丢包率。
     """
-    delay_results, delay_meas_results, loss_results, cap_results = await asyncio.gather(
+    delay_results, loss_results, cap_results = await asyncio.gather(
         _safe_query(request, Q_LINKS_QUALITY),
-        _safe_query(request, Q_LINKS_DELAY_MEASURED),
         _safe_query(request, Q_LINKS_LOSS),
         _safe_query(request, Q_LINKS_CAPACITY),
     )
@@ -477,14 +475,12 @@ async def links_quality(request: Request) -> JSONResponse:
                     "source": src,
                     "target": dst,
                     "latency": None,
-                    "latency_measured": None,
                     "loss": None,
                     "capacity_bps": None,
                 },
             )[field] = value
 
     _collect(delay_results, "latency")
-    _collect(delay_meas_results, "latency_measured")
     _collect(loss_results, "loss")
     _collect(cap_results, "capacity_bps")
 
@@ -548,12 +544,10 @@ async def qos_score(request: Request) -> JSONResponse:
       单向 src→dst 口径）。额定值取 OVS 的 `qos_link_capacity_bits`。
     """
     (
-        delay_rows, delay_meas_rows, loss_rows, bw_rows, cap_rows, sw_rows,
-        rule_rows, fail_rows, open_rows, listen_rows, route_rows, syn_rows,
-        loss_cfg_rows,
+        delay_rows, loss_rows, bw_rows, cap_rows, sw_rows, rule_rows,
+        fail_rows, open_rows, listen_rows, route_rows, syn_rows, loss_cfg_rows,
     ) = await asyncio.gather(
         _safe_query(request, Q_LINKS_QUALITY),
-        _safe_query(request, Q_LINKS_DELAY_MEASURED),
         _safe_query(request, Q_LINKS_LOSS),
         _safe_query(request, Q_LINKS_BANDWIDTH),
         _safe_query(request, Q_LINKS_CAPACITY),
@@ -567,16 +561,8 @@ async def qos_score(request: Request) -> JSONResponse:
         _safe_query(request, Q_LINKS_LOSS_CONFIGURED),
     )
 
-    delays_cfg = [v for v in (_scalar([r]) for r in delay_rows) if v is not None]
-    delays_meas = [v for v in (_scalar([r]) for r in delay_meas_rows) if v is not None]
+    delays = [v for v in (_scalar([r]) for r in delay_rows) if v is not None]
     losses = [v for v in (_scalar([r]) for r in loss_rows) if v is not None]
-
-    # 时延：**优先用实测值**（控制器主动 ICMP 探测）。没有实测样本时退回
-    # netem 的配置值，并把 measured 标志置 False——配置值恒定不变，
-    # 拿它评分等于给「时延/抖动」两个维度永久满分。
-    delay_is_measured = bool(delays_meas)
-    delays = delays_meas if delays_meas else delays_cfg
-    delay_source = "实测(主动探测)" if delay_is_measured else "netem 配置值"
 
     # 时延：线性扣分，0ms 满分、50ms 归零。实测均值 4.8ms / 峰值 22ms。
     avg_delay = sum(delays) / len(delays) if delays else None
@@ -635,15 +621,11 @@ async def qos_score(request: Request) -> JSONResponse:
 
     dims = [
         {"key": "latency", "label": "时延",
-         "score": _lin(avg_delay, 50.0),
-         "measured": delay_is_measured and avg_delay is not None,
-         "detail": (f"均值 {avg_delay:.1f} ms（{delay_source}）")
-                   if avg_delay is not None else "无数据"},
+         "score": _lin(avg_delay, 50.0), "measured": avg_delay is not None,
+         "detail": f"均值 {avg_delay:.1f} ms" if avg_delay is not None else "无数据"},
         {"key": "jitter", "label": "抖动",
-         "score": _lin(delay_std, 20.0),
-         "measured": delay_is_measured and delay_std is not None,
-         "detail": (f"时延标准差 {delay_std:.1f} ms（{delay_source}）")
-                   if delay_std is not None else "无数据"},
+         "score": _lin(delay_std, 20.0), "measured": delay_std is not None,
+         "detail": f"时延标准差 {delay_std:.1f} ms" if delay_std is not None else "无数据"},
         {"key": "loss", "label": "丢包率",
          "score": _lin(avg_loss, 5.0), "measured": avg_loss is not None,
          "detail": (
