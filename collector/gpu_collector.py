@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
-"""
-GPU Collector (NVIDIA)
-通过 pynvml 调用 NVML 采集 GPU 指标，输出格式兼容 DCGM exporter。
-1.txt 中的 18 个 DCGM_FI_DEV_* 指标全部覆盖。
-若主机无 NVIDIA 驱动/设备，指标列表为空。
+"""GPU 指标采集（NVIDIA）。
 
-pynvml（nvidia-ml-py）是**可选**依赖：未安装时本采集器降级为空输出，
+通过 `pynvml`（NVML）调用，输出格式兼容 DCGM exporter：
+`DCGM_FI_DEV_*` 共 18 项，外加自研的 `node_gpu_flops_peak`（峰值算力）。
+
+`pynvml`（nvidia-ml-py）是**可选**依赖：未安装时本采集器降级为空输出，
 主机侧的 CPU/内存/磁盘等指标照常上报。早前这里是硬 import，
 目标机没装 nvidia-ml-py 会让整个 exporter 启动失败 —— 该主机不是「缺 GPU
 指标」，而是在 Prometheus 里彻底消失，连 node_* 也一起没了。
-"""
 
-import os
-import time
+指标含义见 `METRICS.md`。
+"""
+from __future__ import annotations
+
+import json
 import socket
+from typing import Any, Callable
+
+from promtext import MetricWriter
 
 try:
     import pynvml
@@ -28,7 +32,7 @@ PYNVML_AVAILABLE = pynvml is not None
 
 
 # ---------------------------------------------------------------------------
-# 标签字段（顺序与 1.txt 保持一致）
+# 标签字段（顺序即输出顺序）
 # ---------------------------------------------------------------------------
 
 _LABEL_KEYS = ('gpu', 'UUID', 'pci_bus_id', 'device', 'modelName',
@@ -49,24 +53,24 @@ _LABEL_KEYS = ('gpu', 'UUID', 'pci_bus_id', 'device', 'modelName',
 # （`A100-SXM4-40GB` 必须排在 `A100` 之前，否则会被后者抢走）。
 # 数值取自 NVIDIA 官方规格表，单位 TFLOPS。
 _FLOPS_SPECS = [
-    ('H200',           67.0,   34.0,   989.0),
-    ('H100 SXM',       67.0,   34.0,   989.0),
-    ('H100 PCIe',      51.0,   26.0,   756.0),
-    ('H100',           67.0,   34.0,   989.0),
-    ('A100-SXM4-80',   19.5,    9.7,   312.0),
-    ('A100-PCIE-80',   19.5,    9.7,   312.0),
-    ('A100-SXM4-40',   19.5,    9.7,   312.0),
-    ('A100-PCIE-40',   19.5,    9.7,   312.0),
-    ('A100',           19.5,    9.7,   312.0),
-    ('A30',            16.0,    7.4,   165.0),
-    ('L40S',           91.6,    1.43,  362.0),
-    ('L40',            90.5,    1.43,  181.0),
-    ('A40',            37.4,    0.58,  149.7),
-    ('V100-SXM2-32',   15.7,    7.8,   125.0),
-    ('V100-SXM2-16',   14.0,    7.0,   112.0),
-    ('V100-PCIE-32',   14.0,    7.0,   112.0),
-    ('V100',           14.0,    7.0,   112.0),
-    ('T4',              8.1,    0.33,   65.0),
+    ('H200',           67.0,   34.0,  989.0),
+    ('H100 SXM',       67.0,   34.0,  989.0),
+    ('H100 PCIe',      51.0,   26.0,  756.0),
+    ('H100',           67.0,   34.0,  989.0),
+    ('A100-SXM4-80',   19.5,    9.7,  312.0),
+    ('A100-PCIE-80',   19.5,    9.7,  312.0),
+    ('A100-SXM4-40',   19.5,    9.7,  312.0),
+    ('A100-PCIE-40',   19.5,    9.7,  312.0),
+    ('A100',           19.5,    9.7,  312.0),
+    ('A30',            16.0,    7.4,  165.0),
+    ('L40S',           91.6,    1.43, 362.0),
+    ('L40',            90.5,    1.43, 181.0),
+    ('A40',            37.4,    0.58, 149.7),
+    ('V100-SXM2-32',   15.7,    7.8,  125.0),
+    ('V100-SXM2-16',   14.0,    7.0,  112.0),
+    ('V100-PCIE-32',   14.0,    7.0,  112.0),
+    ('V100',           14.0,    7.0,  112.0),
+    ('T4',              8.1,    0.33,  65.0),
     ('Quadro RTX 4000', 11.75,  0.294,  49.0),
     ('RTX 4090',       82.6,    1.29,  330.0),
     ('RTX 3090',       35.6,    0.56,  285.0),
@@ -76,7 +80,7 @@ _FLOPS_SPECS = [
 _TFLOPS = 1e12
 
 
-def _lookup_flops_specs(model_name):
+def _lookup_flops_specs(model_name: str | None) -> dict:
     """按 modelName 查规格表，返回 {precision: FLOPS/s}；型号未收录返回 {}。
 
     未收录就不发指标。调用方靠 gpu_count 区分「这台机器没有 GPU 卡」与
@@ -93,7 +97,11 @@ def _lookup_flops_specs(model_name):
     return {}
 
 
-def _safe(fn, default=0):
+# ---------------------------------------------------------------------------
+# NVML 取值辅助
+# ---------------------------------------------------------------------------
+
+def _safe(fn: Callable[[], Any], default: Any = 0) -> Any:
     """包裹 pynvml 调用，失败返回 default。"""
     try:
         v = fn()
@@ -102,7 +110,7 @@ def _safe(fn, default=0):
         return default
 
 
-def _first_of_pair(fn):
+def _first_of_pair(fn: Callable[[], Any]) -> Any:
     """调用返回二元组的 pynvml 函数，取第一项；失败返回 0。"""
     try:
         return fn()[0]
@@ -110,119 +118,97 @@ def _first_of_pair(fn):
         return 0
 
 
-# ---------------------------------------------------------------------------
-# 各指标的取值器（返回数值；标签由 _read_gpu 在外层统一附加）
-# ---------------------------------------------------------------------------
-
-def _value_gpu_temp(h, _info):
-    return _safe(lambda: pynvml.nvmlDeviceGetTemperature(
-        h, pynvml.NVML_TEMPERATURE_GPU))
-
-
-def _value_gpu_util(h, _info):
-    return _safe(lambda: pynvml.nvmlDeviceGetUtilizationRates(h).gpu)
-
-
-def _value_mem_clock(h, _info):
-    return _safe(lambda: pynvml.nvmlDeviceGetClockInfo(
-        h, pynvml.NVML_CLOCK_MEM))
-
-
-def _value_sm_clock(h, _info):
-    return _safe(lambda: pynvml.nvmlDeviceGetClockInfo(
-        h, pynvml.NVML_CLOCK_SM))
-
-
-def _value_power_usage(h, _info):
-    return _safe(lambda: pynvml.nvmlDeviceGetPowerUsage(h))
-
-
-def _value_mem_info(attr):
-    def _fn(h, _info):
+def _mem_info(attr: str) -> Callable[[Any, Any], float]:
+    """显存信息取值器（bytes → MiB）。"""
+    def _fn(h: Any, _info: Any) -> float:
         try:
             info = pynvml.nvmlDeviceGetMemoryInfo(h)
-            return getattr(info, attr, 0) / (1024 * 1024)  # bytes → MiB
+            return getattr(info, attr, 0) / (1024 * 1024)
         except Exception:
             return 0
     return _fn
 
 
-def _value_dec_util(h, _info):
-    return _first_of_pair(lambda: pynvml.nvmlDeviceGetDecoderUtilization(h))
-
-
-def _value_enc_util(h, _info):
-    return _first_of_pair(lambda: pynvml.nvmlDeviceGetEncoderUtilization(h))
-
-
-def _value_mem_copy_util(h, _info):
-    return _safe(lambda: pynvml.nvmlDeviceGetUtilizationRates(h).memory)
-
-
-def _value_memory_temp(h, _info):
-    return _safe(lambda: pynvml.nvmlDeviceGetTemperature(
-        h, pynvml.NVML_TEMPERATURE_MEMORY))
-
-
-def _value_remapped(attr):
-    def _fn(h, _info):
+def _remapped(attr: str) -> Callable[[Any, Any], int]:
+    """显存行重映射计数取值器。"""
+    def _fn(h: Any, _info: Any) -> int:
         try:
             corr, uncorr, _pending, failure = pynvml.nvmlDeviceGetRemappedRows(h)
-            if attr == 'failure':
-                return 1 if failure else 0
-            return corr if attr == 'correctable' else uncorr
+            return {'correctable': corr, 'uncorrectable': uncorr, 'failure': failure}[attr]
         except Exception:
             return 0
     return _fn
 
 
-def _value_pcie_replay(h, _info):
-    return _safe(lambda: pynvml.nvmlDeviceGetPcieReplayCounter(h))
+# ---------------------------------------------------------------------------
+# 指标定义：(指标名, 取值器)
+# 取值器签名 (handle, info) → 数值；单个指标失败一律降级为 0，不影响其他指标。
+# ---------------------------------------------------------------------------
 
-
-def _value_total_energy(h, _info):
-    return _safe(lambda: pynvml.nvmlDeviceGetTotalEnergyConsumption(h))
-
-
-def _value_vgpu_license(h, _info):
-    return _safe(lambda: pynvml.nvmlDeviceGetVgpuLicenseStatus(h))
-
-
-# (指标名, 取值器)
-METRICS = [
-    ("DCGM_FI_DEV_CORRECTABLE_REMAPPED_ROWS", _value_remapped('correctable')),
-    ("DCGM_FI_DEV_DEC_UTIL", _value_dec_util),
-    ("DCGM_FI_DEV_ENC_UTIL", _value_enc_util),
-    ("DCGM_FI_DEV_FB_FREE", _value_mem_info('free')),
-    ("DCGM_FI_DEV_FB_RESERVED", _value_mem_info('reserved')),
-    ("DCGM_FI_DEV_FB_USED", _value_mem_info('used')),
-    ("DCGM_FI_DEV_GPU_TEMP", _value_gpu_temp),
-    ("DCGM_FI_DEV_GPU_UTIL", _value_gpu_util),
-    ("DCGM_FI_DEV_MEMORY_TEMP", _value_memory_temp),
-    ("DCGM_FI_DEV_MEM_CLOCK", _value_mem_clock),
-    ("DCGM_FI_DEV_MEM_COPY_UTIL", _value_mem_copy_util),
-    ("DCGM_FI_DEV_PCIE_REPLAY_COUNTER", _value_pcie_replay),
-    ("DCGM_FI_DEV_POWER_USAGE", _value_power_usage),
-    ("DCGM_FI_DEV_ROW_REMAP_FAILURE", _value_remapped('failure')),
-    ("DCGM_FI_DEV_SM_CLOCK", _value_sm_clock),
-    ("DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION", _value_total_energy),
-    ("DCGM_FI_DEV_UNCORRECTABLE_REMAPPED_ROWS", _value_remapped('uncorrectable')),
-    ("DCGM_FI_DEV_VGPU_LICENSE_STATUS", _value_vgpu_license),
-]
+METRICS: tuple = (
+    ("DCGM_FI_DEV_CORRECTABLE_REMAPPED_ROWS", _remapped('correctable')),
+    ("DCGM_FI_DEV_DEC_UTIL",
+     lambda h, _i: _first_of_pair(lambda: pynvml.nvmlDeviceGetDecoderUtilization(h))),
+    ("DCGM_FI_DEV_ENC_UTIL",
+     lambda h, _i: _first_of_pair(lambda: pynvml.nvmlDeviceGetEncoderUtilization(h))),
+    ("DCGM_FI_DEV_FB_FREE", _mem_info('free')),
+    ("DCGM_FI_DEV_FB_RESERVED", _mem_info('reserved')),
+    ("DCGM_FI_DEV_FB_USED", _mem_info('used')),
+    ("DCGM_FI_DEV_GPU_TEMP",
+     lambda h, _i: _safe(lambda: pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU))),
+    ("DCGM_FI_DEV_GPU_UTIL",
+     lambda h, _i: _safe(lambda: pynvml.nvmlDeviceGetUtilizationRates(h).gpu)),
+    ("DCGM_FI_DEV_MEMORY_TEMP",
+     lambda h, _i: _safe(lambda: pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_MEMORY))),
+    ("DCGM_FI_DEV_MEM_CLOCK",
+     lambda h, _i: _safe(lambda: pynvml.nvmlDeviceGetClockInfo(h, pynvml.NVML_CLOCK_MEM))),
+    ("DCGM_FI_DEV_MEM_COPY_UTIL",
+     lambda h, _i: _safe(lambda: pynvml.nvmlDeviceGetUtilizationRates(h).memory)),
+    ("DCGM_FI_DEV_PCIE_REPLAY_COUNTER",
+     lambda h, _i: _safe(lambda: pynvml.nvmlDeviceGetPcieReplayCounter(h))),
+    ("DCGM_FI_DEV_POWER_USAGE",
+     lambda h, _i: _safe(lambda: pynvml.nvmlDeviceGetPowerUsage(h))),
+    ("DCGM_FI_DEV_ROW_REMAP_FAILURE", _remapped('failure')),
+    ("DCGM_FI_DEV_SM_CLOCK",
+     lambda h, _i: _safe(lambda: pynvml.nvmlDeviceGetClockInfo(h, pynvml.NVML_CLOCK_SM))),
+    ("DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION",
+     lambda h, _i: _safe(lambda: pynvml.nvmlDeviceGetTotalEnergyConsumption(h))),
+    ("DCGM_FI_DEV_UNCORRECTABLE_REMAPPED_ROWS", _remapped('uncorrectable')),
+    ("DCGM_FI_DEV_VGPU_LICENSE_STATUS",
+     lambda h, _i: _safe(lambda: pynvml.nvmlDeviceGetVgpuLicenseStatus(h))),
+)
 
 
 # ---------------------------------------------------------------------------
 # 标签提取
 # ---------------------------------------------------------------------------
 
-def _driver_version():
+def _driver_version() -> str:
     try:
         return pynvml.nvmlSystemGetDriverVersion()
     except Exception:
         return ""
 
 
-def _read_gpu(index):
+def _format_pci_bus_id(handle: Any) -> str:
+    """把 NVML 的 PCI 总线信息格式化为 'DDDD:BB:DD.F'。"""
+    try:
+        pci = pynvml.nvmlDeviceGetPciInfo(handle)
+        bus = getattr(pci, 'busId', None) or getattr(pci, 'busIdLegacy', None)
+        if isinstance(bus, str) and bus:
+            return bus
+        if bus is None:
+            return ""
+        # 旧驱动：按 domain/bus/device 拼装
+        domain = getattr(pci, 'domain', 0)
+        b = getattr(pci, 'bus', 0)
+        device = getattr(pci, 'device', 0)
+        return f'{domain:08x}:{b:02x}:{device:02x}.0'
+    except Exception:
+        return ""
+
+
+def _read_gpu(index: int) -> dict | None:
     """读取单块 GPU 的标签 + 各指标值；返回 dict 或 None。"""
     try:
         h = pynvml.nvmlDeviceGetHandleByIndex(index)
@@ -242,22 +228,9 @@ def _read_gpu(index):
     return {**info, 'metrics': metrics}
 
 
-def _format_pci_bus_id(handle):
-    """把 NVML 的 PCI 总线信息格式化为 'DDDD:BB:DD.F'。"""
-    try:
-        pci = pynvml.nvmlDeviceGetPciInfo(handle)
-        bus = getattr(pci, 'busId', None) or getattr(pci, 'busIdLegacy', None)
-        if isinstance(bus, str) and bus:
-            return bus
-        if bus is None:
-            return ""
-        # 旧驱动：按 domain/bus/device 拼装
-        domain = getattr(pci, 'domain', 0)
-        b = getattr(pci, 'bus', 0)
-        device = getattr(pci, 'device', 0)
-        return f'{domain:08x}:{b:02x}:{device:02x}.0'
-    except Exception:
-        return ""
+def _label_pairs(gpu_info: dict) -> list:
+    """按 _LABEL_KEYS 的固定顺序取出 (键, 值) 列表。"""
+    return [(key, gpu_info.get(key, '')) for key in _LABEL_KEYS]
 
 
 # ---------------------------------------------------------------------------
@@ -272,27 +245,31 @@ class GpuCollector:
     返回空字符串，宿主机的 node_* 指标不受任何影响。
     """
 
-    def __init__(self):
-        self._data = {'gpus': [], 'driver_version': ''}
+    def __init__(self) -> None:
+        self._data: dict = {'gpus': [], 'driver_version': ''}
         self.available = PYNVML_AVAILABLE
 
     def collect(self) -> dict:
         self._collect_all()
         return self._data
 
-    def _collect_all(self):
-        self._data = {'gpus': [], 'driver_version': ''}
+    def _collect_all(self) -> None:
+        # 局部组装、最后整体赋值：采集器实例被所有 HTTP 线程共享，
+        # 边采边改 self._data 会让并发抓取读到半成品快照。
+        data: dict = {'gpus': [], 'driver_version': ''}
         self.available = False
         if pynvml is None:
+            self._data = data
             return
         try:
             pynvml.nvmlInit()
         except Exception:
+            self._data = data
             return
         try:
             count = pynvml.nvmlDeviceGetCount()
-            self._data['driver_version'] = _driver_version()
-            self._data['gpus'] = [
+            data['driver_version'] = _driver_version()
+            data['gpus'] = [
                 g for g in (_read_gpu(i) for i in range(count)) if g is not None
             ]
             self.available = True
@@ -301,37 +278,23 @@ class GpuCollector:
                 pynvml.nvmlShutdown()
             except Exception:
                 pass
+        self._data = data
 
     def to_json(self) -> str:
-        import json
         return json.dumps(self.collect(), indent=4, ensure_ascii=False)
 
-    def to_prometheus(self, **_kwargs) -> str:
+    def to_prometheus(self, **_kwargs: Any) -> str:
         data = self.collect()
-        lines = []
+        writer = MetricWriter()
         for gpu in data.get('gpus', []):
-            labels_str = _format_labels(gpu)
+            labels = _label_pairs(gpu)
             for name, _extractor in METRICS:
-                lines.append(
-                    f'{name}{{{labels_str}}} {gpu["metrics"].get(name, 0)}'
-                )
-            for precision, value in _lookup_flops_specs(
-                gpu.get('modelName')
-            ).items():
-                lines.append(
-                    f'node_gpu_flops_peak{{{labels_str},precision="{precision}"}} '
-                    f'{value:.0f}'
-                )
-        return '\n'.join(lines) + '\n'
-
-
-def _format_labels(gpu_info):
-    parts = []
-    for key in _LABEL_KEYS:
-        val = str(gpu_info.get(key, '')).replace('\\', '\\\\').replace(
-            '"', '\\"').replace('\n', '\\n')
-        parts.append(f'{key}="{val}"')
-    return ','.join(parts)
+                writer.add_pairs(name, gpu['metrics'].get(name, 0), labels)
+            # 峰值算力：标签与 DCGM 指标一致，precision 追加在最后
+            for precision, value in _lookup_flops_specs(gpu.get('modelName')).items():
+                writer.add_pairs('node_gpu_flops_peak', f'{value:.0f}',
+                                 [*labels, ('precision', precision)])
+        return writer.render()
 
 
 if __name__ == '__main__':

@@ -98,15 +98,18 @@ python3 deploy-tool/deploy.py deploy --target D1 --dry-run
 
 ## collector/ 架构要点
 
-- `host_collector.py` — `HostCollector` 类。`_read_*` 方法各自读取一个 procfs/sysfs 数据源；`_collect_all()` 一次性调用它们，结果存 `self._data`。输出两种格式：`to_json()` / `to_prometheus()`。
-- `gpu_collector.py` — `GpuCollector` 类，通过 `pynvml` 调用 NVML，覆盖 `DCGM_FI_DEV_*` 指标。`to_prometheus(**_kwargs)` 忽略多余 kwargs，便于上层统一调用。**pynvml 是可选依赖**：`import pynvml` 包在 try/except 里，失败时 `PYNVML_AVAILABLE=False`、`GpuCollector.available=False`，`to_prometheus()` 返回空串——主机侧 `node_*` 指标照常上报。exporter 启动时打一条 `[WARN]` 提示缺 GPU 指标（避免「这台机没 GPU」与「采集器装坏了」混淆）。
-- `metrics_exporter.py` — `MetricsHandler` (`BaseHTTPRequestHandler`) 持有 `collectors` 列表，每次抓取对每个采集器调用 `to_prometheus()` 并拼接。`MetricsExporter` 默认挂载 `HostCollector + GpuCollector`。用 `ThreadingHTTPServer`（非 `HTTPServer`）：单线程版会被一个慢连接阻塞所有抓取。
+- `host_collector.py` — `HostCollector` 类。分三层：`_read_*` 各读一个 procfs/sysfs 数据源 → `_emit_*` 翻译成指标文本 → `collect()`/`to_json()`/`to_prometheus()`。**指标名与内部字段的映射写成常量表**（`_MEMORY_METRICS`/`_DISK_*_METRICS`/`_NET_FIELDS` 等），新增指标改表即可。
+- `gpu_collector.py` — `GpuCollector` 类，通过 `pynvml` 调用 NVML，覆盖 `DCGM_FI_DEV_*` 指标。指标定义是一张 `(指标名, 取值器)` 的声明式表。`to_prometheus(**_kwargs)` 忽略多余 kwargs，便于上层统一调用。**pynvml 是可选依赖**：`import pynvml` 包在 try/except 里，失败时 `PYNVML_AVAILABLE=False`、`GpuCollector.available=False`，`to_prometheus()` 返回空串——主机侧 `node_*` 指标照常上报。exporter 启动时打一条 `[WARN]` 提示缺 GPU 指标（避免「这台机没 GPU」与「采集器装坏了」混淆）。
+- `promtext.py` — Prometheus 文本曝光格式的写出工具。**标签值的转义只此一处**（`_escape_label_value`）：漏转义会让 Prometheus 拒收整次抓取、该 target 全部指标丢失。
+- `metrics_exporter.py` — `MetricsHandler` (`BaseHTTPRequestHandler`) + `MetricsServer` (`ThreadingHTTPServer`)。采集器列表挂在**服务器实例**上（不是 handler 的类属性），避免可变类属性做全局状态。用多线程版（非 `HTTPServer`）：单线程版会被一个慢连接阻塞所有抓取。**采集器实例被所有 HTTP 线程共享**，故 `HostCollector`/`GpuCollector` 都必须「局部组装、整体赋值」`self._data`——边采边改会让并发抓取读到半成品快照。
+- **指标清单见 `collector/METRICS.md`**（采集了哪些内容、每个指标什么含义、口径与陷阱、backen 侧的 PromQL 对照）。改采集逻辑或新增指标后**必须同步更新该文件**；文档里提到的指标名要与 `/metrics` 实际输出严格一致（可用脚本比对）。
 
 **Prometheus 输出约定**（影响 PromQL 编写）：
 - `node_cpu_seconds_total{mode=...}` 在 `_read_cpu_stat` 中已 `/100`，直接是秒
 - 磁盘 `sectors_read`/`sectors_written` 在 `to_prometheus()` 中 `×512` 转字节
 - 磁盘 `io_time_ms` `/1000` 转秒
-- 磁盘**只上报最上层块设备**（`_disk_skip_devices()`）：分区、RAID 成员盘、LVM/device-mapper 中间层全部过滤，否则同一份 IO 会被按层重复累加，`node_disk_*_bytes_total` 成倍虚高。判定靠 sysfs 的 `holders`/`slaves`/`partition` 层次关系，不猜设备名；`/sys` 不可见时不过滤（宁可少过滤也不丢指标）
+- 磁盘**只上报最上层块设备**（`_disk_skip_devices()`）：分区、RAID 成员盘、LVM/device-mapper 中间层全部过滤，否则同一份 IO 会被按层重复累加，`node_disk_*_bytes_total` 成倍虚高。判定靠 sysfs 的 `holders`/`slaves`/`partition` 层次关系，不猜设备名；`/sys` 不可见时**不过滤**（宁可少过滤也不丢指标）——**绝不能因为读不到 `/sys/block` 就让整次抓取失败**，否则该主机的全部指标都会消失
+- 网卡错误/丢包计数（`node_network_{receive,transmit}_{errs,drop}_total`）与磁盘 discard/flush 计数（`node_disk_discard*` / `node_disk_flush*`）**只在内核提供对应列时才发射**——「不支持」与「计数为 0」是两回事
 - 计数器无 `# HELP`/`# TYPE` 头（Prometheus 自动推断）
 - `node_uname_info` / `node_os_info` / `node_dmi_info` 的标签值**已做引号/反斜杠转义**（`_escape_label_value()`）
 
