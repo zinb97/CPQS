@@ -463,10 +463,11 @@
     if (!el || typeof echarts === 'undefined') return;
     resourceChart = echarts.init(el);
     const render = () => {
-      const byRegion = {};
+      // 按省份聚合（原先按「华中/东北」这类大区聚合，已去掉大区概念）
+      const byProvince = {};
       allClusters.forEach((c) => {
-        const k = c.region || '其他';
-        const r = byRegion[k] || (byRegion[k] = {
+        const k = c.province || '其他';
+        const r = byProvince[k] || (byProvince[k] = {
           flops: 0, hasFlops: false, online: 0, total: 0, clusters: 0,
         });
         const fp = (c.flops && c.flops.fp64) || 0;
@@ -478,7 +479,7 @@
       // 按 FP64 峰值算力聚合，这张图叫「算力资源」就该是算力而非节点数。
       // 上游无算力指标的集群（老采集器）会得 0，退回节点数至少不空。
       // extra 里带上聚合明细，tooltip 才能说清这个数到底是算力还是节点数。
-      const data = Object.entries(byRegion).map(([name, r]) => ({
+      const data = Object.entries(byProvince).map(([name, r]) => ({
         name,
         value: r.hasFlops ? r.flops : r.online,
         extra: r,
@@ -774,13 +775,13 @@
     el.innerHTML = sorted.map((c, i) => {
       const peak = peakOf(c);
       const name = c.name || '—';
-      // 区域是次要信息，单独用小号弱化字体渲染，给集群名腾出横向空间
-      // （原先整串「科大（华中）」同字号，名字列窄就被截成「科大（…」。
-      const region = c.region || '—';
+      // 省份是次要信息，单独用小号弱化字体渲染，给集群名腾出横向空间
+      // （原先整串「科大（湖南省）」同字号，名字列窄就被截成「科大（…」。
+      const province = c.province || '—';
       const scale = peak >= 1e15 ? (peak / 1e15).toFixed(2) + ' PFLOPS' : (peak / 1e12).toFixed(2) + ' TFLOPS';
       return `<div class="compute-row">
         <span class="rank">#${String(i+1).padStart(2,'0')}</span>
-        <span class="name">${name}<i class="region">（${region}）</i></span>
+        <span class="name">${name}<i class="province">（${province}）</i></span>
         <div class="bar" style="--w:${Math.round((peak / top) * 100)}%"></div>
         <span class="pct" style="color:var(--cyan)">${peak > 0 ? scale : '—'}</span>
       </div>`;

@@ -133,6 +133,7 @@ python3 deploy-tool/deploy.py deploy --target D1 --dry-run
 - PromQL 集中在 `app/prometheus/queries.py`：Dashboard 卡片常量（`Q_*`）+ 资源管控的模板函数（`q_cluster_*` / `q_node_*`，按 `cluster` 或 `instance` 参数化）+ GPU 段（`DCGM_FI_DEV_*`，含 FLOPs 推算 `q_*_flops_peak`）+ `load_cluster_locations()` 加载 `config/cluster_locations.yaml`
 - `PrometheusClient` (`app/prometheus/client.py`) 异步封装 `/api/v1/{query,query_range,targets,labels}`；**所有异常路径返回安全空值**（让调用端走空状态展示而非抛错）
 - 生命周期：`main.py` 的 `lifespan` 启动时构造 `PrometheusClient` 与 `cluster_meta`，关闭时 `aclose()`
+- **集群元数据只有「省份」没有「大区」**：`config/cluster_locations.yaml` 里已移除 `region` 字段（华中/东北那套），界面统一用 `province`（与 `china.json` 的 `properties.name` 对齐，供地图下钻）。大屏「算力资源分布」环形图按**省份**聚合，「算力中心负载 TOP6」显示 `名称（省份）`，集群列表/主机详情只有「省份」一列。改聚合口径时注意别把 `region` 写回去
 - 配置：`app/config.py` 的 frozen dataclass `Settings`，`from_env()` 读取环境变量
 - `cache_response()` **只设 `Cache-Control` 响应头**（`cards_cache_s=4` / `charts_cache_s=28`），**不是服务端缓存**——没有内存存储、没有 TTL、没有 single-flight。每次轮询都真实打到 Prometheus，别把它当性能优化手段
 - 前端是原生 JS + ECharts（CDN），**无构建步骤**；SSR 首屏填充初始快照后靠轮询 5s / 30s

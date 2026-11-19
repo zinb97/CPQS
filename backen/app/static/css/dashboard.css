@@ -556,9 +556,9 @@
   font-weight: 700;
 }
 .dashboard-screen .compute-row .name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 区域是次要信息：小一号 + 弱化颜色，集群名因此能完整显示
+/* 省份是次要信息：小一号 + 弱化颜色，集群名因此能完整显示
    （字号写 11px 会被浏览器的最小字体设置钳到 12px，这里直接按 12px 写） */
-.dashboard-screen .compute-row .name .region {
+.dashboard-screen .compute-row .name .province {
   font-style: normal;
   font-size: 12px;
   color: var(--text-dim);

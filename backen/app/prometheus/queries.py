@@ -306,7 +306,7 @@ def q_cluster_gpu_flops_peak(precision: str) -> str:
 
 
 def load_cluster_locations(path: str | Path) -> dict[str, dict[str, Any]]:
-    """加载集群元数据 → {cluster_id: {name, region, location, ...}}。
+    """加载集群元数据 → {cluster_id: {name, province, location, ...}}。
 
     若文件不存在或解析失败，返回空字典（地图降级为无坐标散点）。
     """

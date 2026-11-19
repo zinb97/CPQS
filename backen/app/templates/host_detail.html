@@ -116,7 +116,6 @@
         <div><dt>主机名</dt><dd id="iHostname">—</dd></div>
         <div><dt>Prometheus 地址</dt><dd id="iInstance">{{ instance }}</dd></div>
         <div><dt>抓取任务</dt><dd id="iJob">—</dd></div>
-        <div><dt>区域</dt><dd id="iRegion">—</dd></div>
         <div><dt>省份</dt><dd id="iProvince">—</dd></div>
         <div><dt>最近抓取时间</dt><dd id="iScrape">—</dd></div>
         <div><dt>最近错误</dt><dd id="iError" class="host-info__error">—</dd></div>
@@ -556,7 +555,6 @@
     setText('iCluster', d.cluster_name || d.cluster_id || '—');
     setText('iHostname', d.hostname || (d.uname && d.uname.nodename) || '—');
     setText('iJob', d.job);
-    setText('iRegion', d.region || '—');
     setText('iProvince', d.province || '—');
     setText('iScrape', fmtTime(d.last_scrape));
     setText('iError', d.last_error || '无');

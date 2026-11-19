@@ -411,7 +411,6 @@ async def map_data(request: Request) -> JSONResponse:
         clusters.append({
             "id": cid,
             "name": meta.get("name", cid),
-            "region": meta.get("region", ""),
             "province": meta.get("province", ""),
             "location": meta.get("location", [0, 0]),
             "online_nodes": online,
@@ -427,8 +426,7 @@ async def map_data(request: Request) -> JSONResponse:
             clusters.append({
                 "id": cid,
                 "name": meta.get("name", cid),
-                "region": meta.get("region", ""),
-                "province": meta.get("province", ""),
+                    "province": meta.get("province", ""),
                 "location": meta.get("location", [0, 0]),
                 "online_nodes": 0,
                 "total_nodes": 0,
@@ -766,7 +764,7 @@ async def _node_flops(request: Request, instance: str) -> dict[str, dict[str, fl
 async def clusters(request: Request) -> JSONResponse:
     """集群列表：按 cluster_id 聚合节点目标，叠加 yaml 元数据 + 实时聚合指标。
 
-    每项含：id, name, region, province, location, online_nodes, total_nodes, status,
+    每项含：id, name, province, location, online_nodes, total_nodes, status,
             cpu_usage, mem_usage, load1, cpu_cores, mem_total, max_temp。
     Prometheus 不可达时降级为仅展示 yaml 元数据（status='unknown'，指标字段为 null）。
     """
@@ -851,7 +849,6 @@ async def clusters(request: Request) -> JSONResponse:
         items.append({
             "id": cid,
             "name": meta.get("name", cid),
-            "region": meta.get("region", ""),
             "province": meta.get("province", ""),
             "location": meta.get("location", [0, 0]),
             "online_nodes": online,
@@ -1248,7 +1245,6 @@ async def host_detail(instance: str, request: Request) -> JSONResponse:
         "job": labels.get("job", ""),
         "cluster_id": cid,
         "cluster_name": cluster.get("name", cid),
-        "region": cluster.get("region", ""),
         "province": cluster.get("province", ""),
         "health": target.get("health") or "unknown",
         "last_scrape": target.get("lastScrape"),

@@ -140,6 +140,17 @@ backen/
     └── cluster_locations.yaml
 ```
 
+## 集群元数据
+
+`config/cluster_locations.yaml` 里每个集群的字段：
+
+| 字段 | 说明 |
+|------|------|
+| `id` | 与 Prometheus `labels.cluster` 对齐 |
+| `name` | 集群名（界面主标识） |
+| `province` | 省份，**与 `china.json` 的 `properties.name` 对齐**（用于地图下钻）；大区（华中/东北这类）概念已移除，界面统一按省份展示与聚合 |
+| `location` | 经纬度 |
+
 ## PromQL 适配
 
 `queries.py` 集中存放所有 PromQL，按数据来源分三段：

@@ -69,14 +69,6 @@ _COMPUTE_SVG = (
     '<line x1="1" y1="14" x2="4" y2="14"/>'
     "</svg>"
 )
-_CLUSTERS_SVG = (
-    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'
-    '<rect x="3" y="3" width="7" height="7" rx="1"/>'
-    '<rect x="14" y="3" width="7" height="7" rx="1"/>'
-    '<rect x="3" y="14" width="7" height="7" rx="1"/>'
-    '<rect x="14" y="14" width="7" height="7" rx="1"/>'
-    "</svg>"
-)
 MENU_ITEMS: list[MenuItem] = [
     {"id": "dashboard", "label": "态势总览大屏", "path": "/", "icon": _DASHBOARD_SVG},
     {
@@ -84,9 +76,7 @@ MENU_ITEMS: list[MenuItem] = [
         "label": "资源管控中心",
         "path": "/resource",
         "icon": _RESOURCE_SVG,
-        "children": [
-            {"id": "clusters", "label": "集群列表", "path": "/resource/clusters", "icon": _CLUSTERS_SVG},
-        ],
+        # 原先带「集群列表」子菜单，已移除：点「资源管控中心」直接进 /resource/clusters
     },
     {"id": "network", "label": "网络管控中心", "path": "/network", "icon": _NETWORK_SVG},
     {"id": "task", "label": "任务调度中心", "path": "/task", "icon": _TASK_SVG},
