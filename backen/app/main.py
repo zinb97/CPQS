@@ -13,6 +13,7 @@ from app.prometheus.client import PrometheusClient
 from app.prometheus.queries import load_cluster_locations
 from app.routers import api as api_router
 from app.routers import dashboard as dashboard_router
+from app.routers import health as health_router
 from app.routers import resource as resource_router
 from app.routers import shells as shells_router
 
@@ -62,6 +63,8 @@ def create_app() -> FastAPI:
     app.include_router(shells_router.router)
     app.include_router(resource_router.router)
     app.include_router(api_router.router)
+    # /health：浏览器侧时延测量页（时延由运行浏览器的设备实测）
+    app.include_router(health_router.router)
 
     return app
 

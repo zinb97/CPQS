@@ -11,6 +11,7 @@ HTTP 请求
   ├─ /resource/*        → 原生页面（集群列表 / 集群详情 / 主机详情）
   ├─ /network /task /telemetry /compute
   │                      → iframe 壳页面，嵌入外部子系统（不代理）
+  ├─ /health            → 浏览器侧时延测量页（时延由运行浏览器的设备实测）
   └─ /api/metrics/*      → JSON 端点，前端轮询用
                             │
                             ▼
@@ -42,6 +43,7 @@ python -m app.main
 | `PROMETHEUS_URL` | `http://192.168.10.31:9090` | Prometheus HTTP API 地址 |
 | `CLUSTER_META_PATH` | `config/cluster_locations.yaml` | 集群元数据文件（相对 backen/ 根） |
 | `REQUEST_TIMEOUT_S` | `3.0` | 单次 Prometheus 查询超时 |
+| `HEALTH_PROBE_SAMPLES` | `3` | `/health` 页面每台服务器采样次数（取中位数） |
 
 ## API 端点
 
@@ -56,6 +58,52 @@ python -m app.main
 | `GET /api/metrics/clusters/{cluster_id}` | 4s | 集群详情（含每节点 10 条 PromQL） |
 | `GET /api/metrics/hosts/{instance}` | 4s | 主机详情 |
 | `GET /api/metrics/hosts/{instance}/timeseries` | 28s | 主机 CPU/内存/网络时间序列 |
+| `GET /health` | 无 | **浏览器侧时延测量页**（时延由运行浏览器的设备实测） |
+| `GET /health/targets` | 无 | 浏览器侧探测用的目标清单（各服务器的 `url`） |
+
+## `/health` —— 浏览器侧实测时延
+
+**服务器端测不到「运行浏览器的设备 → 其它服务器」这条路径**——那是客户端的网络出口
+（可能走不同的出口、不同的 NAT、不同的运营商链路），服务器能测的只有「backen → 各台
+服务器」，那是另一条路径。因此时延一律由**浏览器自己**探测。
+
+打开 `GET /health`（即 `/health/browser`）后：
+
+1. 页面从 `/health/targets` 取各服务器的探测地址（采集器的 `GET /health`，返回 `OK`）
+2. 浏览器用 `fetch(url, {mode:'no-cors'})` 逐个请求，每台采样 `HEALTH_PROBE_SAMPLES`
+   （默认 3）次
+3. 表格给出分段耗时
+
+| 列 | 来源 | 含义 |
+|----|------|------|
+| **TCP 握手 RTT**（主指标） | `connectEnd - connectStart` | 一次 TCP 三次握手的往返时间，**浏览器能拿到的最接近 ping 的量**；不含 DNS、不含 HTTP 往返、不含服务端处理 |
+| DNS | `domainLookupEnd - domainLookupStart` | 域名解析耗时（目标是 IP 字面量时通常为 0） |
+| 首字节 | `responseStart - requestStart` | 请求发出到收到首个响应字节，含服务端处理 + 一次往返 |
+| 总耗时 | `fetch()` 墙钟时间 | 用户实际感知的打开时延（= DNS + 建连 + HTTP 往返 + 浏览器开销） |
+| 采样波动 | 握手 RTT 的极差 | 链路抖动 |
+
+**采集器必须返回 `Timing-Allow-Origin`**：跨源请求下浏览器会把 Resource Timing 的分段
+字段清零，没有该头就只能给出「总耗时」（页面会显示橙色提示条说明这一点）。新版采集器的
+`/health` 已带该头 —— **需要部署才生效**：
+
+```bash
+python3 deploy-tool/deploy.py deploy --all --restart-tasks
+```
+
+**浏览器的硬限制**：JavaScript 不能建裸 TCP 连接、不能发 ICMP，只能发 HTTP 请求。
+所以没有任何一列等于纯 ICMP ping。
+
+分段数据做了两层防假值处理：① 只在「起点 > 0 且终点 > 起点」时才做差（Chrome 跨源
+清零字段时可能只清零其中一个，否则会算出「DNS 613ms > 总耗时 505ms」这种假值）；
+② 校验「各段之和 ≤ 该样本总耗时」，不满足的样本整组分段丢弃。
+
+其它浏览器侧拦截：页面为 HTTPS 时目标为 HTTP 会被判「混合内容」；公网页面访问内网
+地址（`192.168.10.x`）可能被 Private Network Access 策略拦截。这类失败会显示具体
+错误信息。
+
+`/health/targets` 返回的字段：`hostname`（来自 `node_uname_info`，同 IP 不同端口的
+唯一区分标识）、`cluster`、`instance`（`ip:port`，端口映射后的对外地址）、`url`
+（探测用地址）、`prom_health`（Prometheus 视角的抓取健康态）。
 
 > 「缓存」列指响应头 `Cache-Control: max-age=N`（`cache_response()`）。**服务端没有内存缓存、没有 TTL 存储、没有 single-flight** —— 该头仅提示浏览器/中间代理缓存。每个标签页的每次轮询都会真实打到 Prometheus。
 
@@ -71,19 +119,22 @@ backen/
 │   ├── menu.py              # 侧边栏菜单 + base_context
 │   ├── prometheus/
 │   │   ├── client.py        # 异步 httpx 客户端
-│   │   └── queries.py       # PromQL 常量 + 集群元数据加载
+│   │   ├── queries.py       # PromQL 常量 + 集群元数据加载
+│   │   └── targets.py       # 目标枚举 + 主机名映射（api.py 与 /health 共用）
 │   ├── routers/
 │   │   ├── dashboard.py     # GET /
 │   │   ├── resource.py      # 资源管控中心原生页面（集群/主机详情）
 │   │   ├── shells.py        # 4 个 iframe 页面（network/task/telemetry/compute）
+│   │   ├── health.py        # GET /health（浏览器侧测量页）/ /health/targets
 │   │   └── api.py           # 9 个 JSON 端点
 │   ├── templates/
 │   │   ├── base.html        # header + sidebar 布局
 │   │   ├── dashboard.html   # Dashboard 内容
+│   │   ├── health.html      # 浏览器侧时延测量页
 │   │   └── shell.html        # iframe 壳
 │   └── static/
-│       ├── css/             # 4 个 CSS（精简版）
-│       ├── js/              # app.js + dashboard.js
+│       ├── css/             # 4 个 CSS（精简版）+ health.css
+│       ├── js/              # app.js + dashboard.js + health.js
 │       └── data/china.json  # ECharts 中国 GeoJSON
 └── config/
     └── cluster_locations.yaml

@@ -29,6 +29,10 @@ class Settings:
     cards_cache_s: int = 4
     charts_cache_s: int = 28
 
+    # ===== /health 浏览器侧时延测量 =====
+    # 每台服务器采样次数（页面侧取中位数作为代表值）
+    health_probe_samples: int = 3
+
     # ===== iframe 壳的外部子系统地址 =====
     # backen 不做反向代理，浏览器必须能直连这些地址才能渲染 iframe。
     # 默认值对应当前部署环境：
@@ -56,4 +60,7 @@ class Settings:
                 "SHELL_TELEMETRY_URL", cls.shell_telemetry_url
             ),
             shell_compute_url=os.getenv("SHELL_COMPUTE_URL", cls.shell_compute_url),
+            health_probe_samples=int(
+                os.getenv("HEALTH_PROBE_SAMPLES", cls.health_probe_samples)
+            ),
         )

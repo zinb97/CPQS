@@ -68,6 +68,7 @@ from app.prometheus.queries import (
     q_node_network_tx,
     q_node_procs_running,
 )
+from app.prometheus.targets import list_node_targets, node_hostnames
 
 
 router = APIRouter(prefix="/api/metrics")
@@ -691,12 +692,11 @@ async def events(request: Request) -> JSONResponse:
 
 
 async def _list_node_targets(request: Request) -> list[dict[str, Any]]:
-    """取 /api/v1/targets 中 `job` 以 `node-` 开头的目标列表。"""
-    try:
-        targets = await _client(request).targets()
-    except Exception:
-        return []
-    return [t for t in targets if (t.get("labels") or {}).get("job", "").startswith("node-")]
+    """取 /api/v1/targets 中 `job` 以 `node-` 开头的目标列表。
+
+    实现放在 app/prometheus/targets.py，与 /health 端点共用同一套口径。
+    """
+    return await list_node_targets(_client(request))
 
 
 async def _node_hostnames(
@@ -712,20 +712,10 @@ async def _node_hostnames(
     一次查询取回全部 `node_uname_info` series（每个 exporter 目标一条），
     再按 instance 过滤，避免逐台查询（N 次 HTTP 请求）。
     `instances` 为 None 时返回全部映射。
+
+    实现放在 app/prometheus/targets.py，与 /health 端点共用同一套口径。
     """
-    rows = await _safe_query(request, "node_uname_info")
-    wanted = set(instances) if instances is not None else None
-    out: dict[str, str] = {}
-    for r in rows:
-        metric = r.get("metric") or {}
-        inst = metric.get("instance")
-        name = metric.get("nodename")
-        if not inst or not name:
-            continue
-        if wanted is not None and inst not in wanted:
-            continue
-        out[inst] = name
-    return out
+    return await node_hostnames(_client(request), instances)
 
 
 async def _cluster_flops(request: Request) -> dict[str, dict[str, dict[str, float]]]:

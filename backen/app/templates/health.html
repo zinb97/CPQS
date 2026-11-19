@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+
+{% block extra_head %}
+<link rel="stylesheet" href="/static/css/health.css">
+{% endblock %}
+
+{% block content %}
+<div class="hb-page" data-samples="{{ probe_samples }}">
+
+  <div class="hb-head">
+    <div>
+      <h2 class="hb-title">服务器时延 · 本机测量</h2>
+      <p class="hb-desc">
+        下面的时延由<b>当前运行浏览器的这台设备</b>直接向各采集器服务器发请求测得，
+        走的是<b>你这条网络出口</b>的路径——同一台服务器在实验室内外访问，时延可能差很多。
+        主指标 <b>TCP 握手 RTT</b> 是浏览器能拿到的最接近 ping 的量（一次 TCP 三次握手的往返），
+        不含 DNS、不含 HTTP 往返。
+      </p>
+    </div>
+    <div class="hb-actions">
+      <button id="hbRun" class="hb-btn hb-btn--primary" type="button">开始测量</button>
+    </div>
+  </div>
+
+  <div class="hb-hint" id="hbHint" hidden></div>
+
+  <div class="hb-cards">
+    <div class="hb-card">
+      <div class="hb-card__v" id="hbCount">—</div>
+      <div class="hb-card__l">目标服务器</div>
+    </div>
+    <div class="hb-card">
+      <div class="hb-card__v" id="hbCliOk">—</div>
+      <div class="hb-card__l">本机侧可达</div>
+    </div>
+    <div class="hb-card">
+      <div class="hb-card__v" id="hbCliAvg">—</div>
+      <div class="hb-card__l">平均握手 RTT</div>
+    </div>
+    <div class="hb-card">
+      <div class="hb-card__v" id="hbCliMax">—</div>
+      <div class="hb-card__l">最大握手 RTT</div>
+    </div>
+  </div>
+
+  <div class="hb-table-wrap">
+    <table class="hb-table">
+      <thead>
+        <tr>
+          <th>主机名</th>
+          <th>集群</th>
+          <th>地址</th>
+          <th class="hb-th-main">TCP 握手 RTT</th>
+          <th>DNS</th>
+          <th>首字节</th>
+          <th>总耗时</th>
+          <th>采样波动</th>
+          <th>状态</th>
+        </tr>
+      </thead>
+      <tbody id="hbBody">
+        <tr><td colspan="9" class="hb-empty">点击「开始测量」</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="hb-note">
+    <b>各列是什么</b>
+    <ul>
+      <li><b>TCP 握手 RTT</b>（主指标）= <code>connectEnd - connectStart</code>，一次 TCP 三次握手的
+          往返时间，最接近 ping；不含 DNS、不含 HTTP 往返、不含服务端处理。</li>
+      <li><b>DNS</b> = <code>domainLookupEnd - domainLookupStart</code>，域名解析耗时
+          （目标是 IP 字面量时通常为 0）。</li>
+      <li><b>首字节</b> = <code>responseStart - requestStart</code>，请求发出到收到首个响应字节，
+          含服务端处理 + 一次往返。</li>
+      <li><b>总耗时</b> = <code>fetch()</code> 的墙钟时间（DNS + 建连 + HTTP 往返 + 浏览器开销），
+          是用户实际感知的打开时延。</li>
+      <li><b>采样波动</b> = 握手 RTT 各次采样的极差，反映链路抖动。</li>
+    </ul>
+
+    <b>实现与限制</b>
+    <ul>
+      <li>用 <code>fetch(url, {mode:'no-cors'})</code> 请求采集器的 <code>GET /health</code>（返回 <code>OK</code>），
+          用 <code>performance.now()</code> 计时，取 {{ probe_samples }} 次采样的中位数。
+          <code>no-cors</code> 是必需的：采集器的 <code>/metrics</code> 没有 CORS 头，
+          普通 cors 模式的跨源请求会被浏览器直接拒掉。</li>
+      <li>分段耗时来自 Resource Timing API，<b>需要采集器的 <code>/health</code> 返回
+          <code>Timing-Allow-Origin</code></b>（新版采集器已加）。没有这个头时浏览器会把分段字段
+          清零，页面只能给出「总耗时」。</li>
+      <li>浏览器对跨源且无该头的资源可能只清零部分字段，因此每段都做了「起点 &gt; 0 且终点 &gt; 起点」
+          的校验，并检查「各段之和 ≤ 该样本总耗时」——不满足的样本整组分段丢弃，避免出现
+          「DNS 大于总耗时」这类假数据。</li>
+      <li>JavaScript 不能建裸 TCP 连接、不能发 ICMP，浏览器只能发 HTTP 请求，
+          所以没有任何一列等于纯 ICMP ping。</li>
+      <li>浏览器会拦截部分请求：页面为 HTTPS 时目标为 HTTP 会被判「混合内容」拦截；
+          公网页面访问内网地址（<code>192.168.10.x</code>）可能被 Private Network Access 策略拦截。
+          这类失败会显示具体错误信息。</li>
+    </ul>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="/static/js/health.js"></script>
+{% endblock %}

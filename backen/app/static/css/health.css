@@ -1,0 +1,214 @@
+/* health.css —— 浏览器侧时延测量页（/health/browser）
+   暗色主题：变量只定义在 .hb-page 作用域内（dashboard.css 那套定义在
+   .dashboard-screen 下，本页不在那个作用域里，取不到）。
+*/
+
+.hb-page {
+    --hb-bg: #061229;
+    --hb-panel: #0f1b30;
+    --hb-panel-2: #132038;
+    --hb-border: #1e3a5f;
+    --hb-cyan: #00e5ff;
+    --hb-text: #d8ecff;
+    --hb-text-dim: #6e88ad;
+    --hb-bad: #ff5577;
+
+    padding: 20px 24px 32px;
+    background: var(--hb-bg);
+    min-height: 100%;
+    color: var(--hb-text);
+    font-size: 13px;
+}
+
+.hb-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+}
+
+.hb-title {
+    font-size: 17px;
+    font-weight: 600;
+    margin: 0 0 6px;
+}
+
+.hb-desc {
+    margin: 0;
+    max-width: 860px;
+    line-height: 1.7;
+    color: var(--hb-text-dim);
+}
+
+.hb-desc b {
+    color: var(--hb-cyan);
+    font-weight: 600;
+}
+
+.hb-actions {
+    display: flex;
+    gap: 8px;
+    flex: 0 0 auto;
+}
+
+.hb-btn {
+    padding: 8px 16px;
+    border: 1px solid var(--hb-border);
+    background: var(--hb-panel-2);
+    color: var(--hb-text);
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all .15s;
+}
+
+.hb-btn:hover:not(:disabled) {
+    border-color: var(--hb-cyan);
+    color: var(--hb-cyan);
+}
+
+.hb-btn--primary {
+    background: rgba(0, 229, 255, .12);
+    border-color: var(--hb-cyan);
+    color: var(--hb-cyan);
+}
+
+.hb-btn:disabled {
+    opacity: .55;
+    cursor: progress;
+}
+
+/* 汇总卡 */
+.hb-cards {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+}
+
+.hb-card {
+    background: var(--hb-panel);
+    border: 1px solid var(--hb-border);
+    border-radius: 8px;
+    padding: 10px 18px;
+    min-width: 120px;
+}
+
+.hb-card__v {
+    font-family: Consolas, monospace;
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--hb-cyan);
+    line-height: 1.2;
+}
+
+.hb-card__l {
+    font-size: 11px;
+    color: var(--hb-text-dim);
+    margin-top: 4px;
+}
+
+/* 表格 */
+.hb-table-wrap {
+    background: var(--hb-panel);
+    border: 1px solid var(--hb-border);
+    border-radius: 8px;
+    /* 10 列在窄屏放不下 → 横向滚动，不要直接裁掉 */
+    overflow-x: auto;
+}
+
+.hb-table {
+    width: 100%;
+    min-width: 900px;
+    border-collapse: collapse;
+}
+
+.hb-table th,
+.hb-table td {
+    padding: 8px 12px;
+    text-align: left;
+    border-bottom: 1px solid #1b2c47;
+    font-size: 13px;
+}
+
+.hb-table th {
+    background: var(--hb-panel-2);
+    color: var(--hb-text-dim);
+    font-weight: 500;
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.hb-table tr:last-child td {
+    border-bottom: none;
+}
+
+.hb-table tbody tr:hover {
+    background: rgba(0, 229, 255, .04);
+}
+
+.hb-mono {
+    font-family: Consolas, monospace;
+    color: var(--hb-text-dim);
+}
+
+.hb-bad {
+    color: var(--hb-bad);
+}
+
+.hb-empty {
+    text-align: center;
+    color: var(--hb-text-dim);
+    padding: 28px 12px;
+}
+
+/* 主指标列（TCP 握手 RTT） */
+.hb-th-main {
+    color: var(--hb-cyan) !important;
+}
+
+/* 采集器未更新（拿不到分段数据）时的提示条 */
+.hb-hint {
+    margin-bottom: 14px;
+    padding: 10px 14px;
+    background: rgba(255, 179, 71, .08);
+    border-left: 2px solid #ffb347;
+    border-radius: 0 6px 6px 0;
+    color: #ffb347;
+    font-size: 12px;
+    line-height: 1.7;
+}
+
+.hb-hint[hidden] {
+    display: none;
+}
+
+/* 说明 */
+.hb-note {
+    margin-top: 16px;
+    padding: 12px 16px;
+    background: rgba(0, 229, 255, .04);
+    border-left: 2px solid var(--hb-cyan);
+    border-radius: 0 8px 8px 0;
+    color: var(--hb-text-dim);
+    line-height: 1.8;
+}
+
+.hb-note b {
+    color: var(--hb-text);
+}
+
+.hb-note ul {
+    margin: 6px 0 0;
+    padding-left: 18px;
+}
+
+.hb-note code {
+    font-family: Consolas, monospace;
+    background: rgba(0, 0, 0, .3);
+    padding: 1px 5px;
+    border-radius: 3px;
+    color: var(--hb-cyan);
+}

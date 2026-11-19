@@ -71,7 +71,18 @@ class MetricsHandler(http.server.BaseHTTPRequestHandler):
         self._write(200, 'text/plain; version=0.0.4; charset=utf-8', body)
 
     def _respond_health(self) -> None:
-        self._write(200, 'text/plain; charset=utf-8', 'OK')
+        # /health 是给「浏览器侧时延测量」用的轻量探测目标（返回 OK，几十字节）。
+        # Timing-Allow-Origin 让浏览器的 Resource Timing API 在跨源场景下也能给出
+        # DNS/TCP/首字节的分段耗时；没有它，浏览器会把这些字段清零。
+        # Access-Control-Allow-Origin 让响应体可读——这里只回一个 "OK"，无敏感信息。
+        # 注意：/metrics 不加这两个头，指标内容不跨源暴露。
+        self._write(
+            200, 'text/plain; charset=utf-8', 'OK',
+            extra_headers={
+                'Timing-Allow-Origin': '*',
+                'Access-Control-Allow-Origin': '*',
+            },
+        )
 
     def _respond_index(self) -> None:
         # Content-Type 必须带 charset=utf-8：否则浏览器按本地编码（如 GBK）
@@ -96,13 +107,18 @@ class MetricsHandler(http.server.BaseHTTPRequestHandler):
         except ConnectionError:
             self.close_connection = True
 
-    def _write(self, status: int, content_type: str, body: str) -> None:
+    def _write(
+        self, status: int, content_type: str, body: str,
+        extra_headers: dict | None = None,
+    ) -> None:
         if isinstance(body, str):
             body = body.encode('utf-8')
         try:
             self.send_response(status)
             self.send_header('Content-Type', content_type)
             self.send_header('Content-Length', str(len(body)))
+            for k, v in (extra_headers or {}).items():
+                self.send_header(k, v)
             self.end_headers()
             self.wfile.write(body)
         except ConnectionError:

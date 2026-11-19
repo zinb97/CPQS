@@ -540,10 +540,12 @@
 }
 .dashboard-screen .compute-row {
   display: grid;
-  /* 末列放算力数值（最宽 "128.60 PFLOPS"），不是百分比 */
-  grid-template-columns: 50px 1fr 70px 96px;
+  /* 末列放算力数值（最宽 "128.60 PFLOPS"），不是百分比。
+     名字列原来只有 62px，「科大（华中）」需要 78px → 被截成「科大（…」。
+     这里压缩名次列/进度条列并收窄间距，把宽度让给名字列。 */
+  grid-template-columns: 36px minmax(0, 1fr) 48px 96px;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   padding: 6px 8px;
   background: rgba(0, 229, 255, 0.04);
   border-left: 2px solid var(--cyan);
@@ -554,6 +556,13 @@
   font-weight: 700;
 }
 .dashboard-screen .compute-row .name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 区域是次要信息：小一号 + 弱化颜色，集群名因此能完整显示
+   （字号写 11px 会被浏览器的最小字体设置钳到 12px，这里直接按 12px 写） */
+.dashboard-screen .compute-row .name .region {
+  font-style: normal;
+  font-size: 12px;
+  color: var(--text-dim);
+}
 .dashboard-screen .compute-row .bar {
   height: 6px;
   background: rgba(0, 229, 255, 0.1);
@@ -572,6 +581,9 @@
   text-align: right;
   font-family: "Consolas", monospace;
   color: var(--green);
+  /* 12px 才能把 "128.60 PFLOPS" 完整塞进 96px 列；nowrap 防止换行撑高行高 */
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 /* ===== 空状态 ===== */

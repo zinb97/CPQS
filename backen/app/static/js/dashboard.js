@@ -30,6 +30,33 @@
     return 'busy';
   }
 
+  // FLOPS/s 单位自适应，与后端 _auto_flops 同口径（EFLOPS/PFLOPS/TFLOPS/GFLOPS）。
+  // 写死 PFLOPS 时，单机规模的集群（FP64 约 1.6 TF）会显示成 0.0016 PFLOPS，
+  // 既读不出数，也无法和其它卡横向比较。
+  function fmtFlops(v) {
+    const n = Number(v);
+    if (!isFinite(n)) return '—';
+    const abs = Math.abs(n);
+    if (abs >= 1e18) return (n / 1e18).toFixed(2) + ' EFLOPS';
+    if (abs >= 1e15) return (n / 1e15).toFixed(2) + ' PFLOPS';
+    if (abs >= 1e12) return (n / 1e12).toFixed(2) + ' TFLOPS';
+    if (abs >= 1e9) return (n / 1e9).toFixed(2) + ' GFLOPS';
+    return n.toFixed(2) + ' FLOPS';
+  }
+
+  // ECharts 默认 tooltip 是白底黑字，而大屏是暗色主题：只设 textStyle 颜色
+  // （白）不改背景，文字就白底白字——内容其实渲染了，但看不见（表现为"悬浮为空"）。
+  // 地图图早就显式给了深色底，这里统一成同一套样式。
+  const TOOLTIP_THEME = {
+    backgroundColor: 'rgba(0, 30, 60, 0.92)',
+    borderColor: '#00e5ff',
+    borderWidth: 1,
+    padding: [8, 12],
+    textStyle: { color: '#fff', fontSize: 12 },
+    extraCssText: 'box-shadow: 0 4px 16px rgba(0,0,0,0.45); border-radius: 4px;',
+  };
+  const TOOLTIP_DIM = 'color:#8fb0d8';
+
   // ===== 网页全屏（不调用 Fullscreen API，只切换样式类让大屏填满浏览器视口） =====
   const FS_ENTER_SVG =
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
@@ -439,12 +466,23 @@
       const byRegion = {};
       allClusters.forEach((c) => {
         const k = c.region || '其他';
-        // 按 FP32 峰值算力聚合，这张图叫「算力资源」就该是算力而非节点数。
-        // 上游无算力指标的集群（老采集器）会得 0，退回节点数至少不空。
-        const v = c.flops && c.flops.fp64 > 0 ? c.flops.fp64 : Math.max(c.online_nodes, 0);
-        byRegion[k] = (byRegion[k] || 0) + v;
+        const r = byRegion[k] || (byRegion[k] = {
+          flops: 0, hasFlops: false, online: 0, total: 0, clusters: 0,
+        });
+        const fp = (c.flops && c.flops.fp64) || 0;
+        if (fp > 0) { r.flops += fp; r.hasFlops = true; }
+        r.online += Math.max(c.online_nodes || 0, 0);
+        r.total += Math.max(c.total_nodes || 0, 0);
+        r.clusters += 1;
       });
-      const data = Object.entries(byRegion).map(([name, value]) => ({ name, value }));
+      // 按 FP64 峰值算力聚合，这张图叫「算力资源」就该是算力而非节点数。
+      // 上游无算力指标的集群（老采集器）会得 0，退回节点数至少不空。
+      // extra 里带上聚合明细，tooltip 才能说清这个数到底是算力还是节点数。
+      const data = Object.entries(byRegion).map(([name, r]) => ({
+        name,
+        value: r.hasFlops ? r.flops : r.online,
+        extra: r,
+      }));
       if (!data.length) {
         // 空态不能用 el.innerHTML 覆盖：ECharts 的图表容器是 el 的子节点，
         // innerHTML 赋值会把它连同 canvas 一起从文档里摘掉，此后 setOption
@@ -465,10 +503,23 @@
       resourceChart.setOption({
         tooltip: {
           trigger: 'item',
-          textStyle: { color: '#fff' },
-          valueFormatter: (v) => (v >= 1e15
-            ? (v / 1e15).toFixed(2) + ' PFLOPS'
-            : (v / 1e12).toFixed(2) + ' TFLOPS'),
+          ...TOOLTIP_THEME,
+          formatter: (p) => {
+            if (!p || !p.name) return '';
+            const extra = (p.data && p.data.extra) || {};
+            const rows = [`<b>${p.name}</b>`];
+            if (extra.hasFlops) {
+              rows.push(`FP64 算力：${fmtFlops(p.value)}`);
+            } else {
+              // 该区域没有算力指标，环图退回到在线节点数——必须写清楚，
+              // 否则会被当成算力读。
+              rows.push(`在线节点：${extra.online || 0} 个`);
+              rows.push(`<span style="${TOOLTIP_DIM}">（无算力指标，按节点数统计）</span>`);
+            }
+            rows.push(`集群数：${extra.clusters || 0} 个 · 在线节点：${extra.online || 0}/${extra.total || 0}`);
+            rows.push(`<span style="${TOOLTIP_DIM}">占全国：${p.percent}%</span>`);
+            return rows.join('<br/>');
+          },
         },
         legend: {
           bottom: 0,
@@ -487,6 +538,7 @@
           data: data.map((d, i) => ({
             value: d.value,
             name: d.name,
+            extra: d.extra,
             itemStyle: { color: palette[i % palette.length] },
           })),
         }],
@@ -543,7 +595,27 @@
       rxData.push(...align(rx));
       txData.push(...align(tx));
       trafficChart.setOption({
-        tooltip: { trigger: 'axis', textStyle: { color: '#fff' } },
+        tooltip: {
+          trigger: 'axis',
+          ...TOOLTIP_THEME,
+          axisPointer: { type: 'line', lineStyle: { color: 'rgba(0,229,255,0.45)' } },
+          formatter: (params) => {
+            if (!params || !params.length) return '';
+            const head = `<div style="${TOOLTIP_DIM};font-size:12px">${params[0].axisValue}</div>`;
+            const rows = params.map((p) => {
+              // 对不上的时间点是 null（没数据），不是 0——写成 0 会让人误以为
+              // 流量掉到了零。
+              const v = (p.value === null || p.value === undefined)
+                ? '<span style="' + TOOLTIP_DIM + '">无数据</span>'
+                : Number(p.value).toFixed(2) + ' Mbps';
+              const dot = `<span style="display:inline-block;width:8px;height:8px;`
+                + `border-radius:50%;background:${p.color};margin-right:6px"></span>`;
+              return `<div style="display:flex;align-items:center;justify-content:space-between;gap:16px">`
+                + `<span>${dot}${p.seriesName}</span><b>${v}</b></div>`;
+            });
+            return head + rows.join('');
+          },
+        },
         legend: {
           data: ['入向流量', '出向流量'],
           textStyle: { color: '#a4c8ff', fontSize: 11 },
@@ -567,6 +639,9 @@
           {
             name: '入向流量', type: 'line', smooth: true, symbol: 'none',
             lineStyle: { width: 2, color: '#00e5ff' },
+            // itemStyle 决定 tooltip 里那个小圆点的颜色；只设 lineStyle 时
+            // tooltip 会用 ECharts 默认调色板（蓝/绿），和线本身的颜色对不上。
+            itemStyle: { color: '#00e5ff' },
             areaStyle: {
               color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
                 { offset: 0, color: 'rgba(0,229,255,0.55)' },
@@ -578,6 +653,7 @@
           {
             name: '出向流量', type: 'line', smooth: true, symbol: 'none',
             lineStyle: { width: 2, color: '#00ff9d' },
+            itemStyle: { color: '#00ff9d' },
             areaStyle: {
               color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
                 { offset: 0, color: 'rgba(0,255,157,0.5)' },
@@ -626,7 +702,7 @@
       qosChart.setOption({
         tooltip: {
           trigger: 'item',
-          textStyle: { color: '#fff' },
+          ...TOOLTIP_THEME,
           formatter: () => list.map((d) =>
             `${d.measured ? '●' : '○'} ${d.label}：${
               d.measured && d.score != null ? Math.round(d.score) + ' 分'
@@ -697,11 +773,14 @@
 
     el.innerHTML = sorted.map((c, i) => {
       const peak = peakOf(c);
-      const name = `${c.name}（${c.region || '—'}）`;
+      const name = c.name || '—';
+      // 区域是次要信息，单独用小号弱化字体渲染，给集群名腾出横向空间
+      // （原先整串「科大（华中）」同字号，名字列窄就被截成「科大（…」。
+      const region = c.region || '—';
       const scale = peak >= 1e15 ? (peak / 1e15).toFixed(2) + ' PFLOPS' : (peak / 1e12).toFixed(2) + ' TFLOPS';
       return `<div class="compute-row">
         <span class="rank">#${String(i+1).padStart(2,'0')}</span>
-        <span class="name">${name}</span>
+        <span class="name">${name}<i class="region">（${region}）</i></span>
         <div class="bar" style="--w:${Math.round((peak / top) * 100)}%"></div>
         <span class="pct" style="color:var(--cyan)">${peak > 0 ? scale : '—'}</span>
       </div>`;

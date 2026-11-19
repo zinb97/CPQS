@@ -9,6 +9,13 @@
 - 启动：`cd collector && python3 metrics_exporter.py --port 9100`
   （**必须在 collector/ 目录内启动**，用的是裸导入 `from host_collector import ...`）
 - 端点：`/metrics`（Prometheus 文本格式）、`/health`、`/`
+  - `/health` 返回 `OK`（几十字节），是 backen「浏览器侧时延测量」页的探测目标
+    （浏览器跨源请求各服务器的 `/health` 并计时，测的是「运行浏览器的那台设备 →
+    各服务器」的路径）。该响应额外带 `Timing-Allow-Origin: *` 与
+    `Access-Control-Allow-Origin: *`：前者让浏览器的 Resource Timing API 在跨源
+    场景下也能给出 DNS/TCP/首字节分段耗时（否则这些字段会被浏览器清零），
+    后者让响应体可读——这里只回一个 `OK`，无敏感信息。
+    **`/metrics` 不带这两个头**，指标内容不跨源暴露。
 - Prometheus 抓取配置见 `prometheus/prometheus.yml`；`cluster` / `location` /
   `instance` 标签由 Prometheus 注入，**采集器自己不上报**。
 
