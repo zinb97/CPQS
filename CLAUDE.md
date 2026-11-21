@@ -2,6 +2,39 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## 快速参考
+
+### 常用命令
+
+```bash
+# 验证语法（无需启动服务）
+cd collector && python -m py_compile *.py
+cd backen && python -m py_compile app/*.py app/*/*.py
+python3 -m py_compile deploy-tool/deploy.py
+
+# 启动服务（开发环境）
+cd collector && python metrics_exporter.py --port 9100
+cd backen && uvicorn app.main:app --host 0.0.0.0 --port 8080
+cd QoSController && ryu-manager QoSController.py --wsapi-port 8080 --observe-links
+
+# 部署到远端服务器
+python3 deploy-tool/deploy.py check --all              # 只读预检
+python3 deploy-tool/deploy.py deploy --target D1       # 部署到单台
+python3 deploy-tool/deploy.py deploy --all --restart-tasks  # 部署到全部并重启
+python3 deploy-tool/deploy.py status --all             # 查看远端任务状态
+```
+
+### 关键文件速查
+
+| 文件 | 作用 |
+|------|------|
+| `collector/METRICS.md` | 指标清单（改采集逻辑后必须同步更新） |
+| `backen/app/prometheus/queries.py` | 所有 PromQL 定义 |
+| `prometheus/prometheus.yml` | cluster/location 标签来源 |
+| `deploy-tool/servers.json` | 服务器列表与后台任务定义 |
+| `backen/config/cluster_locations.yaml` | 集群元数据（经纬度、省份） |
+| `QoSController/CLAUDE.md` | 控制器子模块文档（REST API、DPID 规范） |
+
 ## 仓库总览
 
 仓库由五个相对独立的子系统组成，**代码上互不 import**；但 `backen` 通过 Prometheus 间接消费另外两者的指标，`netSim` 产生的拓扑由 `QoSController` 控制，`deploy-tool` 负责把整个仓库分发到多台服务器。
@@ -189,6 +222,18 @@ python3 deploy-tool/deploy.py status --all   # 只读：查远端后台任务状
 
 端到端验证只能靠实际起服务：起 collector → Prometheus 里查 `up` → 起 backen 看 `/api/metrics/overview` 是否非空。
 
+## Python 版本约束
+
+| 子系统 | Python 版本 | 原因 |
+|--------|-------------|------|
+| `collector/` | 3.6+ | 标准库（可选 `pynvml`） |
+| `backen/` | 3.9+ | FastAPI / asyncio |
+| `netSim/` | 3.7+ | Mininet 兼容 |
+| `deploy-tool/` | 3.9+ | 仅标准库 |
+| `QoSController/` | **3.8 only** | RYU / eventlet 在 3.10 装不起来（`collections.MutableMapping` 已移除）；不支持 `float | None` 语法（用 `Optional[float]`） |
+
+**改控制器代码必须用 Python 3.8 验证**：`/usr/bin/python3.8 /usr/local/bin/ryu-manager`
+
 ## 环境变量（backen）
 
 | 变量 | 默认 | 说明 |
@@ -204,3 +249,37 @@ python3 deploy-tool/deploy.py status --all   # 只读：查远端后台任务状
 | `HEALTH_PROBE_SAMPLES` | `3` | `/health` 页面每台服务器采样次数（取中位数） |
 
 backen 不做反向代理，**浏览器必须能直连上述地址**，否则 iframe 空白（页面本身仍正常渲染）。`101.34.209.104` 是 NAT 后的统一入口，`192.168.10.31` 只在 lab 内网可达。
+
+## 常见任务
+
+### 新增指标
+1. 修改 `collector/host_collector.py` 或 `gpu_collector.py` 的采集逻辑
+2. 更新 `collector/METRICS.md`（指标名必须与实际输出严格一致）
+3. 如需在 Dashboard 展示，修改 `backen/app/prometheus/queries.py` 的 PromQL
+4. 语法检查：`cd collector && python -m py_compile *.py`
+5. 部署并重启：`python3 deploy-tool/deploy.py deploy --all --restart-tasks`
+
+### 修改 Dashboard
+1. 前端无构建步骤，直接改 `backen/templates/*.html` 和 `backen/static/js/*.js`
+2. PromQL 集中在 `backen/app/prometheus/queries.py`
+3. 本地验证：`cd backen && uvicorn app.main:app --reload`
+4. **PromQL 聚合函数必须小写**（`sum()` 不是 `SUM()`），否则静默失败显示 "—"
+
+### 修改拓扑
+1. 编辑 `netSim/cmnet.py` 的 `CMNetTopo` 类
+2. Dryrun 验证（无需 sudo）：见「验证」一节的 dryrun 命令
+3. 启动：`sudo python3 cmnet.py --scale medium --controller-ip 127.0.0.1`
+
+### 新增服务器
+1. 编辑 `deploy-tool/servers.json` 的 `servers` 数组
+2. 添加分组：`python3 deploy-tool/deploy.py group add <组名> <服务器名>`
+3. 预检：`python3 deploy-tool/deploy.py check --target <服务器名>`
+4. 在 `prometheus/prometheus.yml` 添加抓取目标（需重启 Prometheus）
+5. 在 `backen/config/cluster_locations.yaml` 添加集群元数据（如需在地图显示）
+
+### 排查指标缺失
+1. 检查采集器：`curl http://<ip>:<port>/metrics | grep <指标名>`
+2. 检查 Prometheus：在 Prometheus UI 执行 PromQL 查询
+3. 检查 `prometheus/prometheus.yml` 的 `cluster`/`location` 标签注入
+4. 检查 backen 日志：Dashboard 不报错但显示 "—" 时，PromQL 可能写错或指标不存在
+5. 验证 `qos_*` 指标：确认 QoSController 在 8080 端口运行且 `/metrics` 可访问
